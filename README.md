@@ -2,38 +2,58 @@
 
 A library to **sub**mit e**xt**rinsics to a [substrate](https://github.com/paritytech/substrate) node via RPC.
 
-### :warning: Health Warning :warning: considered *alpha* after recent changes, API still subject to change
-
-#### See https://github.com/paritytech/subxt/issues/309 for an overview of outstanding issues.
-
 ## Usage
 
-See [examples](./examples).
+Take a look in the [examples](./examples/examples) folder for various `subxt` usage examples.
+
+### Downloading metadata from a Substrate node
+
+Use the [`subxt-cli`](./cli) tool to download the metadata for your target runtime from a node.
+
+1. Install:
+```bash
+cargo install subxt-cli
+```
+2. Save the encoded metadata to a file:
+```bash
+subxt metadata -f bytes > metadata.scale
+```
+
+This defaults to querying the metadata of a locally running node on the default `http://localhost:9933/`. If querying
+a different node then the `metadata` command accepts a `--url` argument.
+
+## Subxt Documentation
+
+For more details regarding utilizing subxt, please visit the [documentation](https://docs.rs/subxt/latest/subxt/).
 
 ## Integration Testing
 
 Most tests require a running substrate node to communicate with. This is done by spawning an instance of the
-substrate node per test. It requires an executable binary `substrate` at [`polkadot-v0.9.10`](https://github.com/paritytech/substrate/releases/tag/polkadot-v0.9.10) on your path.
+substrate node per test. It requires an up-to-date `substrate` executable on your path.
 
 This can be installed from source via cargo:
 
 ```bash
-cargo install --git https://github.com/paritytech/substrate node-cli --tag=polkadot-v0.9.10 --force
+cargo install --git https://github.com/paritytech/substrate node-cli --force
 ```
+
+## Real world usage
+
+Please add your project to this list via a PR.
+
+- [cargo-contract](https://github.com/paritytech/cargo-contract/) CLI for interacting with Wasm smart contracts.
+- [xcm-cli](https://github.com/ascjones/xcm-cli) CLI for submitting XCM messages.
+- [phala-pherry](https://github.com/Phala-Network/phala-blockchain/tree/master/standalone/pherry) The relayer between Phala blockchain and the off-chain Secure workers.
+- [crunch](https://github.com/turboflakes/crunch) CLI to claim staking rewards in batch every Era or X hours for substrate-based chains.
+- [interbtc-clients](https://github.com/interlay/interbtc-clients) Client implementations for the interBTC parachain; notably the Vault / Relayer and Oracle.
+- [tidext](https://github.com/tidelabs/tidext) Tidechain client with Stronghold signer.
 
 **Alternatives**
 
 [substrate-api-client](https://github.com/scs/substrate-api-client) provides similar functionality.
 
-## Subxt Client
-By default the client builder will connect to a full node via rpc. The `subxt-client` helps
-embedding a light client directly. It can also be used to embed a full node. This is especially
-useful for testing and ci.
-
 #### License
 
-<sup>
-The entire code within this repository is licensed under the <a href="LICENSE">GPLv3</a>.
-Please <a href="https://www.parity.io/contact/">contact us</a> if you have questions about the licensing of our
- products.
-</sup>
+The entire code within this repository is dual licensed under the _GPL-3.0_ or _Apache-2.0_ licenses. See [the LICENSE](./LICENSE) file for more details.
+
+Please <a href="https://www.parity.io/contact/">contact us</a> if you have questions about the licensing of our products.
