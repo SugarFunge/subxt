@@ -1,17 +1,10 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
 use scale_info::{
-    build::{
-        FieldsBuilder,
-        NamedFields,
-        UnnamedFields,
-        Variants,
-    },
-    Path,
-    Type,
-    TypeInfo,
+    build::{Fields, Variants},
+    Path, Type, TypeInfo,
 };
 
 /// See the `ModuleErrorType` in `subxt_codegen` for more info on the different DispatchError
@@ -30,7 +23,7 @@ impl TypeInfo for NamedFieldDispatchError {
             .variant(Variants::new().variant("Module", |builder| {
                 builder
                     .fields(
-                        FieldsBuilder::<NamedFields>::default()
+                        Fields::named()
                             .field(|b| b.name("error").ty::<u8>())
                             .field(|b| b.name("index").ty::<u8>()),
                     )
@@ -53,7 +46,7 @@ impl TypeInfo for LegacyDispatchError {
                 Type::builder()
                     .path(Path::new("ModuleError", "sp_runtime"))
                     .composite(
-                        FieldsBuilder::<NamedFields>::default()
+                        Fields::named()
                             .field(|b| b.name("index").ty::<u8>())
                             .field(|b| b.name("error").ty::<u8>()),
                     )
@@ -64,10 +57,7 @@ impl TypeInfo for LegacyDispatchError {
             .path(Path::new("DispatchError", "sp_runtime"))
             .variant(Variants::new().variant("Module", |builder| {
                 builder
-                    .fields(
-                        FieldsBuilder::<UnnamedFields>::default()
-                            .field(|b| b.ty::<ModuleError>()),
-                    )
+                    .fields(Fields::unnamed().field(|b| b.ty::<ModuleError>()))
                     .index(0)
             }))
     }
@@ -87,7 +77,7 @@ impl TypeInfo for ArrayDispatchError {
                 Type::builder()
                     .path(Path::new("ModuleError", "sp_runtime"))
                     .composite(
-                        FieldsBuilder::<NamedFields>::default()
+                        Fields::named()
                             .field(|b| b.name("index").ty::<u8>())
                             .field(|b| b.name("error").ty::<[u8; 4]>()),
                     )
@@ -98,10 +88,7 @@ impl TypeInfo for ArrayDispatchError {
             .path(Path::new("DispatchError", "sp_runtime"))
             .variant(Variants::new().variant("Module", |builder| {
                 builder
-                    .fields(
-                        FieldsBuilder::<UnnamedFields>::default()
-                            .field(|b| b.ty::<ModuleError>()),
-                    )
+                    .fields(Fields::unnamed().field(|b| b.ty::<ModuleError>()))
                     .index(0)
             }))
     }

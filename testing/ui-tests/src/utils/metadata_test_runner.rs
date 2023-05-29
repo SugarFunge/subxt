@@ -1,4 +1,4 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
@@ -52,9 +52,9 @@ impl MetadataTestRunner {
 
         std::fs::create_dir_all(&tmp_dir).expect("could not create tmp ui test dir");
         // Write metadata to tmp folder:
-        std::fs::write(&tmp_metadata_path, &encoded_metadata).unwrap();
+        std::fs::write(&tmp_metadata_path, encoded_metadata).unwrap();
         // Write test file to tmp folder (it'll be moved by trybuild):
-        std::fs::write(&tmp_rust_path, &rust_file).unwrap();
+        std::fs::write(&tmp_rust_path, rust_file).unwrap();
 
         tmp_rust_path
     }

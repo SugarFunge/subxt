@@ -1,27 +1,13 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
-use super::{
-    Derives,
-    Field,
-    TypeDefParameters,
-    TypeGenerator,
-    TypeParameter,
-    TypePath,
-};
+use crate::error::CodegenError;
+
+use super::{CratePath, Derives, Field, TypeDefParameters, TypeGenerator, TypeParameter, TypePath};
 use proc_macro2::TokenStream;
-use proc_macro_error::abort_call_site;
-use quote::{
-    format_ident,
-    quote,
-};
-use scale_info::{
-    form::PortableForm,
-    Type,
-    TypeDef,
-    TypeDefPrimitive,
-};
+use quote::{format_ident, quote};
+use scale_info::{form::PortableForm, Type, TypeDef, TypeDefPrimitive};
 
 /// Representation of a type which consists of a set of fields. Used to generate Rust code for
 /// either a standalone `struct` definition, or an `enum` variant.
@@ -41,6 +27,7 @@ pub struct CompositeDef {
 
 impl CompositeDef {
     /// Construct a definition which will generate code for a standalone `struct`.
+    #[allow(clippy::too_many_arguments)]
     pub fn struct_def(
         ty: &Type<PortableForm>,
         ident: &str,
@@ -49,8 +36,9 @@ impl CompositeDef {
         field_visibility: Option<syn::Visibility>,
         type_gen: &TypeGenerator,
         docs: &[String],
-    ) -> Self {
-        let mut derives = type_gen.type_derives(ty);
+        crate_path: &CratePath,
+    ) -> Result<Self, CodegenError> {
+        let mut derives = type_gen.type_derives(ty)?;
         let fields: Vec<_> = fields_def.field_types().collect();
 
         if fields.len() == 1 {
@@ -64,7 +52,7 @@ impl CompositeDef {
             {
                 let ty = type_gen.resolve_type(field.type_id);
                 if matches!(
-                    ty.type_def(),
+                    ty.type_def,
                     TypeDef::Primitive(
                         TypeDefPrimitive::U8
                             | TypeDefPrimitive::U16
@@ -73,7 +61,7 @@ impl CompositeDef {
                             | TypeDefPrimitive::U128
                     )
                 ) {
-                    derives.insert_codec_compact_as()
+                    derives.insert_codec_compact_as(crate_path)
                 }
             }
         }
@@ -81,7 +69,7 @@ impl CompositeDef {
         let name = format_ident!("{}", ident);
         let docs_token = Some(quote! { #( #[doc = #docs ] )* });
 
-        Self {
+        Ok(Self {
             name,
             kind: CompositeDefKind::Struct {
                 derives,
@@ -90,15 +78,11 @@ impl CompositeDef {
             },
             fields: fields_def,
             docs: docs_token,
-        }
+        })
     }
 
     /// Construct a definition which will generate code for an `enum` variant.
-    pub fn enum_variant_def(
-        ident: &str,
-        fields: CompositeDefFields,
-        docs: &[String],
-    ) -> Self {
+    pub fn enum_variant_def(ident: &str, fields: CompositeDefFields, docs: &[String]) -> Self {
         let name = format_ident!("{}", ident);
         let docs_token = Some(quote! { #( #[doc = #docs ] )* });
         Self {
@@ -180,24 +164,20 @@ impl CompositeDefFields {
         fields: &[Field],
         parent_type_params: &[TypeParameter],
         type_gen: &TypeGenerator,
-    ) -> Self {
+    ) -> Result<Self, CodegenError> {
         if fields.is_empty() {
-            return Self::NoFields
+            return Ok(Self::NoFields);
         }
 
         let mut named_fields = Vec::new();
         let mut unnamed_fields = Vec::new();
 
         for field in fields {
-            let type_path =
-                type_gen.resolve_type_path(field.ty().id(), parent_type_params);
-            let field_type = CompositeDefFieldType::new(
-                field.ty().id(),
-                type_path,
-                field.type_name().cloned(),
-            );
+            let type_path = type_gen.resolve_field_type_path(field.ty.id, parent_type_params);
+            let field_type =
+                CompositeDefFieldType::new(field.ty.id, type_path, field.type_name.clone());
 
-            if let Some(name) = field.name() {
+            if let Some(name) = &field.name {
                 let field_name = format_ident!("{}", name);
                 named_fields.push((field_name, field_type))
             } else {
@@ -206,17 +186,15 @@ impl CompositeDefFields {
         }
 
         if !named_fields.is_empty() && !unnamed_fields.is_empty() {
-            abort_call_site!(
-                "'{}': Fields should either be all named or all unnamed.",
-                name,
-            )
+            return Err(CodegenError::InvalidFields(name.into()));
         }
 
-        if !named_fields.is_empty() {
+        let res = if !named_fields.is_empty() {
             Self::Named(named_fields)
         } else {
             Self::Unnamed(unnamed_fields)
-        }
+        };
+        Ok(res)
     }
 
     /// Returns the set of composite fields.

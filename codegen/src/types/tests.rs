@@ -1,14 +1,10 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
 use super::*;
 use pretty_assertions::assert_eq;
-use scale_info::{
-    meta_type,
-    Registry,
-    TypeInfo,
-};
+use scale_info::{meta_type, scale, Registry, TypeInfo};
 use syn::parse_quote;
 
 const MOD_PATH: &[&str] = &["subxt_codegen", "types", "tests"];
@@ -38,13 +34,16 @@ fn generate_struct_with_primitives() {
     registry.register_type(&meta_type::<S>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -53,7 +52,9 @@ fn generate_struct_with_primitives() {
             pub mod tests {
                 use super::root;
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct S {
                     pub a: ::core::primitive::bool,
                     pub b: ::core::primitive::u32,
@@ -84,13 +85,16 @@ fn generate_struct_with_a_struct_field() {
     registry.register_type(&meta_type::<Parent>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -99,12 +103,16 @@ fn generate_struct_with_a_struct_field() {
             pub mod tests {
                 use super::root;
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Child {
                     pub a: ::core::primitive::i32,
                 }
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Parent {
                     pub a: ::core::primitive::bool,
                     pub b: root::subxt_codegen::types::tests::Child,
@@ -129,13 +137,16 @@ fn generate_tuple_struct() {
     registry.register_type(&meta_type::<Parent>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -144,10 +155,14 @@ fn generate_tuple_struct() {
                 pub mod tests {
                     use super::root;
 
-                    #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                    #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                    #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                    #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                     pub struct Child(pub ::core::primitive::i32,);
 
-                    #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                    #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                    #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                    #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                     pub struct Parent(pub ::core::primitive::bool, pub root::subxt_codegen::types::tests::Child,);
                 }
             }
@@ -211,13 +226,16 @@ fn derive_compact_as_for_uint_wrapper_structs() {
     registry.register_type(&meta_type::<TSu128>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -226,34 +244,54 @@ fn derive_compact_as_for_uint_wrapper_structs() {
             pub mod tests {
                 use super::root;
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Su128 { pub a: ::core::primitive::u128, }
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Su16 { pub a: ::core::primitive::u16, }
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Su32 { pub a: ::core::primitive::u32, }
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Su64 { pub a: ::core::primitive::u64, }
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Su8 { pub a: ::core::primitive::u8, }
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct TSu128(pub ::core::primitive::u128,);
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct TSu16(pub ::core::primitive::u16,);
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct TSu32(pub ::core::primitive::u32,);
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct TSu64(pub ::core::primitive::u64,);
 
-                #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct TSu8(pub ::core::primitive::u8,);
             }
         }
@@ -275,13 +313,16 @@ fn generate_enum() {
     registry.register_type(&meta_type::<E>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -289,7 +330,9 @@ fn generate_enum() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub enum E {
                     # [codec (index = 0)]
                     A,
@@ -333,13 +376,16 @@ fn compact_fields() {
     registry.register_type(&meta_type::<E>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -347,7 +393,9 @@ fn compact_fields() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub enum E {
                     # [codec (index = 0)]
                     A {
@@ -358,16 +406,72 @@ fn compact_fields() {
                     B( #[codec(compact)] ::core::primitive::u32,),
                 }
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct S {
                     #[codec(compact)] pub a: ::core::primitive::u32,
                 }
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct TupleStruct(#[codec(compact)] pub ::core::primitive::u32,);
             }
         }
         .to_string()
+    )
+}
+
+#[test]
+fn compact_generic_parameter() {
+    use scale::Compact;
+
+    #[allow(unused)]
+    #[derive(TypeInfo)]
+    struct S {
+        a: Option<<u128 as codec::HasCompact>::Type>,
+        nested: Option<Result<Compact<u128>, u8>>,
+        vector: Vec<Compact<u16>>,
+        array: [Compact<u8>; 32],
+        tuple: (Compact<u8>, Compact<u16>),
+    }
+
+    let mut registry = Registry::new();
+    registry.register_type(&meta_type::<S>());
+    let portable_types: PortableRegistry = registry.into();
+
+    let crate_path = "::subxt_path".into();
+    let type_gen = TypeGenerator::new(
+        &portable_types,
+        "root",
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
+    );
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
+    let tests_mod = get_mod(&types, MOD_PATH).unwrap();
+
+    assert_eq!(
+        tests_mod.into_token_stream().to_string(),
+        quote! {
+            pub mod tests {
+                use super::root;
+
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
+                pub struct S {
+                    pub a: ::core::option::Option<::subxt_path::ext::codec::Compact<::core::primitive::u128> >,
+                    pub nested: ::core::option::Option<::core::result::Result<::subxt_path::ext::codec::Compact<::core::primitive::u128>, ::core::primitive::u8 > >,
+                    pub vector: ::std::vec::Vec<::subxt_path::ext::codec::Compact<::core::primitive::u16> >,
+                    pub array: [::subxt_path::ext::codec::Compact<::core::primitive::u8>; 32usize],
+                    pub tuple: (::subxt_path::ext::codec::Compact<::core::primitive::u8>, ::subxt_path::ext::codec::Compact<::core::primitive::u16>,),
+                }
+            }
+        }
+            .to_string()
     )
 }
 
@@ -383,13 +487,16 @@ fn generate_array_field() {
     registry.register_type(&meta_type::<S>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -397,7 +504,9 @@ fn generate_array_field() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct S {
                     pub a: [::core::primitive::u8; 32usize],
                 }
@@ -420,13 +529,16 @@ fn option_fields() {
     registry.register_type(&meta_type::<S>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -434,7 +546,9 @@ fn option_fields() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct S {
                     pub a: ::core::option::Option<::core::primitive::bool>,
                     pub b: ::core::option::Option<::core::primitive::u32>,
@@ -460,13 +574,16 @@ fn box_fields_struct() {
     registry.register_type(&meta_type::<S>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -474,7 +591,9 @@ fn box_fields_struct() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct S {
                     pub a: ::std::boxed::Box<::core::primitive::bool>,
                     pub b: ::std::boxed::Box<::core::primitive::u32>,
@@ -500,13 +619,16 @@ fn box_fields_enum() {
     registry.register_type(&meta_type::<E>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -514,7 +636,9 @@ fn box_fields_enum() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub enum E {
                     # [codec (index = 0)]
                     A(::std::boxed::Box<::core::primitive::bool>,),
@@ -540,13 +664,16 @@ fn range_fields() {
     registry.register_type(&meta_type::<S>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -554,7 +681,9 @@ fn range_fields() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct S {
                     pub a: ::core::ops::Range<::core::primitive::u32>,
                     pub b: ::core::ops::RangeInclusive<::core::primitive::u32>,
@@ -584,13 +713,16 @@ fn generics() {
     registry.register_type(&meta_type::<Bar>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -598,12 +730,16 @@ fn generics() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Bar {
                     pub b: root::subxt_codegen::types::tests::Foo<::core::primitive::u32>,
                     pub c: root::subxt_codegen::types::tests::Foo<::core::primitive::u8>,
                 }
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Foo<_0> {
                     pub a: _0,
                 }
@@ -632,13 +768,16 @@ fn generics_nested() {
     registry.register_type(&meta_type::<Bar<bool>>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -646,12 +785,16 @@ fn generics_nested() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Bar<_0> {
                     pub b: root::subxt_codegen::types::tests::Foo<_0, ::core::primitive::u32>,
                 }
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct Foo<_0, _1> {
                     pub a: _0,
                     pub b: ::core::option::Option<(_0, _1,)>,
@@ -665,10 +808,7 @@ fn generics_nested() {
 #[test]
 fn generate_bitvec() {
     use bitvec::{
-        order::{
-            Lsb0,
-            Msb0,
-        },
+        order::{Lsb0, Msb0},
         vec::BitVec,
     };
 
@@ -683,13 +823,16 @@ fn generate_bitvec() {
     registry.register_type(&meta_type::<S>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -697,10 +840,12 @@ fn generate_bitvec() {
         quote! {
             pub mod tests {
                 use super::root;
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct S {
-                    pub lsb: ::subxt::ext::bitvec::vec::BitVec<::core::primitive::u8, root::bitvec::order::Lsb0>,
-                    pub msb: ::subxt::ext::bitvec::vec::BitVec<::core::primitive::u16, root::bitvec::order::Msb0>,
+                    pub lsb: ::subxt_path::utils::bits::DecodedBits<::core::primitive::u8, ::subxt_path::utils::bits::Lsb0>,
+                    pub msb: ::subxt_path::utils::bits::DecodedBits<::core::primitive::u16, ::subxt_path::utils::bits::Msb0>,
                 }
             }
         }
@@ -736,13 +881,16 @@ fn generics_with_alias_adds_phantom_data_marker() {
     registry.register_type(&meta_type::<UnnamedFields<bool, bool>>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -750,15 +898,21 @@ fn generics_with_alias_adds_phantom_data_marker() {
             quote! {
                 pub mod tests {
                     use super::root;
-                    #[derive(::subxt::ext::codec::CompactAs, ::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                    #[derive(::subxt_path::ext::codec::CompactAs, ::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                    #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                    #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                     pub struct NamedFields<_0> {
                         pub b: ::core::primitive::u32,
-                        #[codec(skip)] pub __subxt_unused_type_params: ::core::marker::PhantomData<_0>
+                        #[codec(skip)]
+                        pub __subxt_unused_type_params: ::core::marker::PhantomData<_0>
                     }
-                    #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                    #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                    #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                    #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                     pub struct UnnamedFields<_0, _1> (
                         pub (::core::primitive::u32, ::core::primitive::u32,),
-                        #[codec(skip)] pub ::core::marker::PhantomData<(_0, _1)>
+                        #[codec(skip)]
+                        pub ::core::marker::PhantomData<(_0, _1)>
                     );
                 }
             }
@@ -796,13 +950,16 @@ fn modules() {
     registry.register_type(&meta_type::<m::c::Foo>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -818,20 +975,26 @@ fn modules() {
                         pub mod b {
                             use super::root;
 
-                            #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                            #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                        #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                        #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                             pub struct Bar {
                                 pub a: root::subxt_codegen::types::tests::m::a::Foo,
                             }
                         }
 
-                        #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                        #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                        #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                        #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                         pub struct Foo;
                     }
 
                     pub mod c {
                         use super::root;
 
-                        #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                        #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                        #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                        #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                         pub struct Foo {
                             pub a: root::subxt_codegen::types::tests::m::a::b::Bar,
                         }
@@ -853,13 +1016,16 @@ fn dont_force_struct_names_camel_case() {
     registry.register_type(&meta_type::<AB>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     let type_gen = TypeGenerator::new(
         &portable_types,
         "root",
-        Default::default(),
-        Default::default(),
+        TypeSubstitutes::new(&crate_path),
+        DerivesRegistry::new(&crate_path),
+        crate_path,
+        true,
     );
-    let types = type_gen.generate_types_mod();
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -868,7 +1034,9 @@ fn dont_force_struct_names_camel_case() {
             pub mod tests {
                 use super::root;
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct AB;
             }
         }
@@ -890,13 +1058,20 @@ fn apply_user_defined_derives_for_all_types() {
     registry.register_type(&meta_type::<A>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     // configure derives
-    let mut derives = DerivesRegistry::default();
+    let mut derives = DerivesRegistry::new(&crate_path);
     derives.extend_for_all(vec![parse_quote!(Clone), parse_quote!(Eq)]);
 
-    let type_gen =
-        TypeGenerator::new(&portable_types, "root", Default::default(), derives);
-    let types = type_gen.generate_types_mod();
+    let type_gen = TypeGenerator::new(
+        &portable_types,
+        "root",
+        TypeSubstitutes::new(&crate_path),
+        derives,
+        crate_path,
+        true,
+    );
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -905,10 +1080,14 @@ fn apply_user_defined_derives_for_all_types() {
             pub mod tests {
                 use super::root;
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Clone, Debug, Eq)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Clone, Debug, Eq)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct A(pub root :: subxt_codegen :: types :: tests :: B,);
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Clone, Debug, Eq)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Clone, Debug, Eq)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct B;
             }
         }
@@ -934,14 +1113,16 @@ fn apply_user_defined_derives_for_specific_types() {
     registry.register_type(&meta_type::<A>());
     let portable_types: PortableRegistry = registry.into();
 
+    let crate_path = "::subxt_path".into();
     // configure derives
-    let mut derives = DerivesRegistry::default();
+    let mut derives = DerivesRegistry::new(&crate_path);
     // for all types
     derives.extend_for_all(vec![parse_quote!(Eq)]);
     // for specific types
     derives.extend_for_type(
         parse_quote!(subxt_codegen::types::tests::B),
         vec![parse_quote!(Hash)],
+        &crate_path,
     );
     // duplicates (in this case `Eq`) will be combined (i.e. a set union)
     derives.extend_for_type(
@@ -951,11 +1132,18 @@ fn apply_user_defined_derives_for_specific_types() {
             parse_quote!(Ord),
             parse_quote!(PartialOrd),
         ],
+        &crate_path,
     );
 
-    let type_gen =
-        TypeGenerator::new(&portable_types, "root", Default::default(), derives);
-    let types = type_gen.generate_types_mod();
+    let type_gen = TypeGenerator::new(
+        &portable_types,
+        "root",
+        TypeSubstitutes::new(&crate_path),
+        derives,
+        crate_path,
+        true,
+    );
+    let types = type_gen.generate_types_mod().expect("Valid type mod; qed");
     let tests_mod = get_mod(&types, MOD_PATH).unwrap();
 
     assert_eq!(
@@ -964,13 +1152,19 @@ fn apply_user_defined_derives_for_specific_types() {
             pub mod tests {
                 use super::root;
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug, Eq)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug, Eq)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct A(pub root :: subxt_codegen :: types :: tests :: B,);
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug, Eq, Hash)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug, Eq, Hash)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct B(pub root :: subxt_codegen :: types :: tests :: C,);
 
-                #[derive(::subxt::ext::codec::Decode, ::subxt::ext::codec::Encode, Debug, Eq, Ord, PartialOrd)]
+                #[derive(::subxt_path::ext::codec::Decode, ::subxt_path::ext::codec::Encode, ::subxt_path::ext::scale_decode::DecodeAsType, ::subxt_path::ext::scale_encode::EncodeAsType, Debug, Eq, Ord, PartialOrd)]
+                #[decode_as_type(crate_path = ":: subxt_path :: ext :: scale_decode")]
+                #[encode_as_type(crate_path = ":: subxt_path :: ext :: scale_encode")]
                 pub struct C;
             }
         }

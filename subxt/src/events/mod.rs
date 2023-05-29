@@ -1,4 +1,4 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
@@ -6,35 +6,18 @@
 //! The two main entry points into events are [`crate::OnlineClient::events()`]
 //! and calls like [crate::tx::TxProgress::wait_for_finalized_success()].
 
-mod event_subscription;
 mod events_client;
 mod events_type;
-mod filter_events;
 
-pub use event_subscription::{
-    EventSub,
-    EventSubscription,
-    FinalizedEventSub,
-};
-pub use events_client::{
-    // Exposed only for testing:
-    subscribe_to_block_headers_filling_in_gaps,
-    EventsClient,
-};
+use codec::{Decode, Encode};
+pub use events_client::EventsClient;
 pub use events_type::{
     EventDetails,
     Events,
+    // Used in codegen but hidden from docs:
+    RootEvent,
 };
-pub use filter_events::{
-    EventFilter,
-    FilterEvents,
-    FilteredEventDetails,
-};
-
-use codec::{
-    Decode,
-    Encode,
-};
+use scale_decode::DecodeAsFields;
 
 /// Trait to uniquely identify the events's identity from the runtime metadata.
 ///
@@ -42,7 +25,7 @@ use codec::{
 ///
 /// The trait is utilized to decode emitted events from a block, via obtaining the
 /// form of the `Event` from the metadata.
-pub trait StaticEvent: Decode {
+pub trait StaticEvent: DecodeAsFields {
     /// Pallet name.
     const PALLET: &'static str;
     /// Event name.

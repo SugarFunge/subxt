@@ -1,4 +1,4 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
@@ -8,40 +8,19 @@ use std::task::Poll;
 
 use crate::{
     client::OnlineClientT,
-    error::{
-        DispatchError,
-        Error,
-        TransactionError,
-    },
-    events::{
-        self,
-        EventDetails,
-        Events,
-        EventsClient,
-        Phase,
-        StaticEvent,
-    },
-    rpc::SubstrateTxStatus,
+    error::{DispatchError, Error, RpcError, TransactionError},
+    events::EventsClient,
+    rpc::types::{Subscription, SubstrateTxStatus},
     Config,
 };
 use derivative::Derivative;
-use futures::{
-    Stream,
-    StreamExt,
-};
-use jsonrpsee::core::{
-    client::Subscription as RpcSubscription,
-    Error as RpcError,
-};
-use sp_runtime::traits::Hash;
-
-pub use sp_runtime::traits::SignedExtension;
+use futures::{Stream, StreamExt};
 
 /// This struct represents a subscription to the progress of some transaction.
 #[derive(Derivative)]
 #[derivative(Debug(bound = "C: std::fmt::Debug"))]
 pub struct TxProgress<T: Config, C> {
-    sub: Option<RpcSubscription<SubstrateTxStatus<T::Hash, T::Hash>>>,
+    sub: Option<Subscription<SubstrateTxStatus<T::Hash, T::Hash>>>,
     ext_hash: T::Hash,
     client: C,
 }
@@ -54,7 +33,7 @@ impl<T: Config, C> Unpin for TxProgress<T, C> {}
 impl<T: Config, C> TxProgress<T, C> {
     /// Instantiate a new [`TxProgress`] from a custom subscription.
     pub fn new(
-        sub: RpcSubscription<SubstrateTxStatus<T::Hash, T::Hash>>,
+        sub: Subscription<SubstrateTxStatus<T::Hash, T::Hash>>,
         client: C,
         ext_hash: T::Hash,
     ) -> Self {
@@ -71,7 +50,11 @@ impl<T: Config, C> TxProgress<T, C> {
     }
 }
 
-impl<T: Config, C: OnlineClientT<T>> TxProgress<T, C> {
+impl<T, C> TxProgress<T, C>
+where
+    T: Config,
+    C: OnlineClientT<T>,
+{
     /// Return the next transaction status when it's emitted. This just delegates to the
     /// [`futures::Stream`] implementation for [`TxProgress`], but allows you to
     /// avoid importing that trait if you don't otherwise need it.
@@ -86,10 +69,10 @@ impl<T: Config, C: OnlineClientT<T>> TxProgress<T, C> {
     /// **Note:** consumes `self`. If you'd like to perform multiple actions as the state of the
     /// transaction progresses, use [`TxProgress::next_item()`] instead.
     ///
-    /// **Note:** transaction statuses like `Invalid` and `Usurped` are ignored, because while they
-    /// may well indicate with some probability that the transaction will not make it into a block,
-    /// there is no guarantee that this is true. Thus, we prefer to "play it safe" here. Use the lower
-    /// level [`TxProgress::next_item()`] API if you'd like to handle these statuses yourself.
+    /// **Note:** transaction statuses like `Invalid`/`Usurped`/`Dropped` indicate with some
+    /// probability that the transaction will not make it into a block but there is no guarantee
+    /// that this is true. In those cases the stream is closed however, so you currently have no way to find
+    /// out if they finally made it into a block or not.
     pub async fn wait_for_in_block(mut self) -> Result<TxInBlock<T, C>, Error> {
         while let Some(status) = self.next_item().await {
             match status? {
@@ -97,13 +80,16 @@ impl<T: Config, C: OnlineClientT<T>> TxProgress<T, C> {
                 TxStatus::InBlock(s) | TxStatus::Finalized(s) => return Ok(s),
                 // Error scenarios; return the error.
                 TxStatus::FinalityTimeout(_) => {
-                    return Err(TransactionError::FinalitySubscriptionTimeout.into())
+                    return Err(TransactionError::FinalityTimeout.into())
                 }
+                TxStatus::Invalid => return Err(TransactionError::Invalid.into()),
+                TxStatus::Usurped(_) => return Err(TransactionError::Usurped.into()),
+                TxStatus::Dropped => return Err(TransactionError::Dropped.into()),
                 // Ignore anything else and wait for next status event:
                 _ => continue,
             }
         }
-        Err(RpcError::Custom("RPC subscription dropped".into()).into())
+        Err(RpcError::SubscriptionDropped.into())
     }
 
     /// Wait for the transaction to be finalized, and return a [`TxInBlock`]
@@ -112,10 +98,10 @@ impl<T: Config, C: OnlineClientT<T>> TxProgress<T, C> {
     /// **Note:** consumes `self`. If you'd like to perform multiple actions as the state of the
     /// transaction progresses, use [`TxProgress::next_item()`] instead.
     ///
-    /// **Note:** transaction statuses like `Invalid` and `Usurped` are ignored, because while they
-    /// may well indicate with some probability that the transaction will not make it into a block,
-    /// there is no guarantee that this is true. Thus, we prefer to "play it safe" here. Use the lower
-    /// level [`TxProgress::next_item()`] API if you'd like to handle these statuses yourself.
+    /// **Note:** transaction statuses like `Invalid`/`Usurped`/`Dropped` indicate with some
+    /// probability that the transaction will not make it into a block but there is no guarantee
+    /// that this is true. In those cases the stream is closed however, so you currently have no way to find
+    /// out if they finally made it into a block or not.
     pub async fn wait_for_finalized(mut self) -> Result<TxInBlock<T, C>, Error> {
         while let Some(status) = self.next_item().await {
             match status? {
@@ -123,13 +109,16 @@ impl<T: Config, C: OnlineClientT<T>> TxProgress<T, C> {
                 TxStatus::Finalized(s) => return Ok(s),
                 // Error scenarios; return the error.
                 TxStatus::FinalityTimeout(_) => {
-                    return Err(TransactionError::FinalitySubscriptionTimeout.into())
+                    return Err(TransactionError::FinalityTimeout.into())
                 }
+                TxStatus::Invalid => return Err(TransactionError::Invalid.into()),
+                TxStatus::Usurped(_) => return Err(TransactionError::Usurped.into()),
+                TxStatus::Dropped => return Err(TransactionError::Dropped.into()),
                 // Ignore and wait for next status event:
                 _ => continue,
             }
         }
-        Err(RpcError::Custom("RPC subscription dropped".into()).into())
+        Err(RpcError::SubscriptionDropped.into())
     }
 
     /// Wait for the transaction to be finalized, and for the transaction events to indicate
@@ -139,17 +128,19 @@ impl<T: Config, C: OnlineClientT<T>> TxProgress<T, C> {
     /// **Note:** consumes self. If you'd like to perform multiple actions as progress is made,
     /// use [`TxProgress::next_item()`] instead.
     ///
-    /// **Note:** transaction statuses like `Invalid` and `Usurped` are ignored, because while they
-    /// may well indicate with some probability that the transaction will not make it into a block,
-    /// there is no guarantee that this is true. Thus, we prefer to "play it safe" here. Use the lower
-    /// level [`TxProgress::next_item()`] API if you'd like to handle these statuses yourself.
-    pub async fn wait_for_finalized_success(self) -> Result<TxEvents<T>, Error> {
+    /// **Note:** transaction statuses like `Invalid`/`Usurped`/`Dropped` indicate with some
+    /// probability that the transaction will not make it into a block but there is no guarantee
+    /// that this is true. In those cases the stream is closed however, so you currently have no way to find
+    /// out if they finally made it into a block or not.
+    pub async fn wait_for_finalized_success(
+        self,
+    ) -> Result<crate::blocks::ExtrinsicEvents<T>, Error> {
         let evs = self.wait_for_finalized().await?.wait_for_success().await?;
         Ok(evs)
     }
 }
 
-impl<T: Config, C: OnlineClientT<T>> Stream for TxProgress<T, C> {
+impl<T: Config, C: Clone> Stream for TxProgress<T, C> {
     type Item = Result<TxStatus<T, C>, Error>;
 
     fn poll_next(
@@ -161,47 +152,55 @@ impl<T: Config, C: OnlineClientT<T>> Stream for TxProgress<T, C> {
             None => return Poll::Ready(None),
         };
 
-        sub.poll_next_unpin(cx)
-            .map_err(|e| e.into())
-            .map_ok(|status| {
-                match status {
-                    SubstrateTxStatus::Future => TxStatus::Future,
-                    SubstrateTxStatus::Ready => TxStatus::Ready,
-                    SubstrateTxStatus::Broadcast(peers) => TxStatus::Broadcast(peers),
-                    SubstrateTxStatus::InBlock(hash) => {
-                        TxStatus::InBlock(TxInBlock::new(
-                            hash,
-                            self.ext_hash,
-                            self.client.clone(),
-                        ))
-                    }
-                    SubstrateTxStatus::Retracted(hash) => TxStatus::Retracted(hash),
-                    SubstrateTxStatus::Usurped(hash) => TxStatus::Usurped(hash),
-                    SubstrateTxStatus::Dropped => TxStatus::Dropped,
-                    SubstrateTxStatus::Invalid => TxStatus::Invalid,
-                    // Only the following statuses are actually considered "final" (see the substrate
-                    // docs on `TxStatus`). Basically, either the transaction makes it into a
-                    // block, or we eventually give up on waiting for it to make it into a block.
-                    // Even `Dropped`/`Invalid`/`Usurped` transactions might make it into a block eventually.
-                    //
-                    // As an example, a transaction that is `Invalid` on one node due to having the wrong
-                    // nonce might still be valid on some fork on another node which ends up being finalized.
-                    // Equally, a transaction `Dropped` from one node may still be in the transaction pool,
-                    // and make it into a block, on another node. Likewise with `Usurped`.
-                    SubstrateTxStatus::FinalityTimeout(hash) => {
-                        self.sub = None;
-                        TxStatus::FinalityTimeout(hash)
-                    }
-                    SubstrateTxStatus::Finalized(hash) => {
-                        self.sub = None;
-                        TxStatus::Finalized(TxInBlock::new(
-                            hash,
-                            self.ext_hash,
-                            self.client.clone(),
-                        ))
-                    }
+        sub.poll_next_unpin(cx).map_ok(|status| {
+            match status {
+                SubstrateTxStatus::Future => TxStatus::Future,
+                SubstrateTxStatus::Ready => TxStatus::Ready,
+                SubstrateTxStatus::Broadcast(peers) => TxStatus::Broadcast(peers),
+                SubstrateTxStatus::InBlock(hash) => {
+                    TxStatus::InBlock(TxInBlock::new(hash, self.ext_hash, self.client.clone()))
                 }
-            })
+                SubstrateTxStatus::Retracted(hash) => TxStatus::Retracted(hash),
+                // Only the following statuses are considered "final", in a sense that they end the stream (see the substrate
+                // docs on `TxStatus`):
+                //
+                // - Usurped
+                // - Finalized
+                // - FinalityTimeout
+                // - Invalid
+                // - Dropped
+                //
+                // Even though `Dropped`/`Invalid`/`Usurped` transactions might make it into a block eventually,
+                // the server considers them final and closes the connection, when they are encountered.
+                // In those cases the stream is closed however, so you currently have no way to find
+                // out if they finally made it into a block or not.
+                //
+                // As an example, a transaction that is `Invalid` on one node due to having the wrong
+                // nonce might still be valid on some fork on another node which ends up being finalized.
+                // Equally, a transaction `Dropped` from one node may still be in the transaction pool,
+                // and make it into a block, on another node. Likewise with `Usurped`.
+                SubstrateTxStatus::FinalityTimeout(hash) => {
+                    self.sub = None;
+                    TxStatus::FinalityTimeout(hash)
+                }
+                SubstrateTxStatus::Finalized(hash) => {
+                    self.sub = None;
+                    TxStatus::Finalized(TxInBlock::new(hash, self.ext_hash, self.client.clone()))
+                }
+                SubstrateTxStatus::Usurped(hash) => {
+                    self.sub = None;
+                    TxStatus::Usurped(hash)
+                }
+                SubstrateTxStatus::Dropped => {
+                    self.sub = None;
+                    TxStatus::Dropped
+                }
+                SubstrateTxStatus::Invalid => {
+                    self.sub = None;
+                    TxStatus::Invalid
+                }
+            }
+        })
     }
 }
 
@@ -234,6 +233,12 @@ impl<T: Config, C: OnlineClientT<T>> Stream for TxProgress<T, C> {
 /// there might be cases where transactions alternate between `Future` and `Ready`
 /// pool, and are `Broadcast` in the meantime.
 ///
+/// You are free to unsubscribe from notifications at any point.
+/// The first one will be emitted when the block in which the transaction was included gets
+/// finalized. The `FinalityTimeout` event will be emitted when the block did not reach finality
+/// within 512 blocks. This either indicates that finality is not available for your chain,
+/// or that finality gadget is lagging behind.
+///
 /// Note that there are conditions that may cause transactions to reappear in the pool:
 ///
 /// 1. Due to possible forks, the transaction that ends up being included
@@ -245,12 +250,17 @@ impl<T: Config, C: OnlineClientT<T>> Stream for TxProgress<T, C> {
 ///    pool about such cases).
 /// 4. `Retracted` transactions might be included in a future block.
 ///
-/// The stream is considered finished only when either the `Finalized` or `FinalityTimeout`
-/// event is triggered. You are however free to unsubscribe from notifications at any point.
-/// The first one will be emitted when the block in which the transaction was included gets
-/// finalized. The `FinalityTimeout` event will be emitted when the block did not reach finality
-/// within 512 blocks. This either indicates that finality is not available for your chain,
-/// or that finality gadget is lagging behind.
+/// Even though these cases can happen, the server-side of the stream is closed, if one of the following is encountered:
+/// - Usurped
+/// - Finalized
+/// - FinalityTimeout
+/// - Invalid
+/// - Dropped
+///
+/// In any of these cases the client side TxProgress stream is also closed.
+/// In those cases the stream is closed however, so you currently have no way to find
+/// out if they finally made it into a block or not.
+
 #[derive(Derivative)]
 #[derivative(Debug(bound = "C: std::fmt::Debug"))]
 pub enum TxStatus<T: Config, C> {
@@ -309,7 +319,7 @@ pub struct TxInBlock<T: Config, C> {
     client: C,
 }
 
-impl<T: Config, C: OnlineClientT<T>> TxInBlock<T, C> {
+impl<T: Config, C> TxInBlock<T, C> {
     pub(crate) fn new(block_hash: T::Hash, ext_hash: T::Hash, client: C) -> Self {
         Self {
             block_hash,
@@ -327,7 +337,9 @@ impl<T: Config, C: OnlineClientT<T>> TxInBlock<T, C> {
     pub fn extrinsic_hash(&self) -> T::Hash {
         self.ext_hash
     }
+}
 
+impl<T: Config, C: OnlineClientT<T>> TxInBlock<T, C> {
     /// Fetch the events associated with this transaction. If the transaction
     /// was successful (ie no `ExtrinsicFailed`) events were found, then we return
     /// the events associated with it. If the transaction was not successful, or
@@ -341,7 +353,7 @@ impl<T: Config, C: OnlineClientT<T>> TxInBlock<T, C> {
     ///
     /// **Note:** This has to download block details from the node and decode events
     /// from them.
-    pub async fn wait_for_success(&self) -> Result<TxEvents<T>, Error> {
+    pub async fn wait_for_success(&self) -> Result<crate::blocks::ExtrinsicEvents<T>, Error> {
         let events = self.fetch_events().await?;
 
         // Try to find any errors; return the first one we encounter.
@@ -349,8 +361,8 @@ impl<T: Config, C: OnlineClientT<T>> TxInBlock<T, C> {
             let ev = ev?;
             if ev.pallet_name() == "System" && ev.variant_name() == "ExtrinsicFailed" {
                 let dispatch_error =
-                    DispatchError::decode_from(ev.field_bytes(), &self.client.metadata());
-                return Err(dispatch_error.into())
+                    DispatchError::decode_from(ev.field_bytes(), self.client.metadata())?;
+                return Err(dispatch_error.into());
             }
         }
 
@@ -363,99 +375,147 @@ impl<T: Config, C: OnlineClientT<T>> TxInBlock<T, C> {
     ///
     /// **Note:** This has to download block details from the node and decode events
     /// from them.
-    pub async fn fetch_events(&self) -> Result<TxEvents<T>, Error> {
+    pub async fn fetch_events(&self) -> Result<crate::blocks::ExtrinsicEvents<T>, Error> {
         let block = self
             .client
             .rpc()
             .block(Some(self.block_hash))
             .await?
-            .ok_or(Error::Transaction(TransactionError::BlockHashNotFound))?;
+            .ok_or(Error::Transaction(TransactionError::BlockNotFound))?;
 
-        let extrinsic_idx = block.block.extrinsics
+        let extrinsic_idx = block
+            .block
+            .extrinsics
             .iter()
             .position(|ext| {
-                let hash = T::Hashing::hash_of(ext);
+                use crate::config::Hasher;
+                let hash = T::Hasher::hash_of(&ext.0);
                 hash == self.ext_hash
             })
             // If we successfully obtain the block hash we think contains our
             // extrinsic, the extrinsic should be in there somewhere..
-            .ok_or(Error::Transaction(TransactionError::BlockHashNotFound))?;
+            .ok_or(Error::Transaction(TransactionError::BlockNotFound))?;
 
         let events = EventsClient::new(self.client.clone())
-            .at(Some(self.block_hash))
+            .at(self.block_hash)
             .await?;
 
-        Ok(TxEvents {
-            ext_hash: self.ext_hash,
-            ext_idx: extrinsic_idx as u32,
+        Ok(crate::blocks::ExtrinsicEvents::new(
+            self.ext_hash,
+            extrinsic_idx as u32,
             events,
-        })
+        ))
     }
 }
 
-/// This represents the events related to our transaction.
-/// We can iterate over the events, or look for a specific one.
-#[derive(Derivative)]
-#[derivative(Debug(bound = ""))]
-pub struct TxEvents<T: Config> {
-    ext_hash: T::Hash,
-    ext_idx: u32,
-    events: Events<T>,
-}
+#[cfg(test)]
+mod test {
+    use std::pin::Pin;
 
-impl<T: Config> TxEvents<T> {
-    /// Return the hash of the block that the transaction has made it into.
-    pub fn block_hash(&self) -> T::Hash {
-        self.events.block_hash()
+    use futures::Stream;
+
+    use crate::{
+        client::{OfflineClientT, OnlineClientT},
+        config::{
+            extrinsic_params::BaseExtrinsicParams,
+            polkadot::{PlainTip, PolkadotConfig},
+            WithExtrinsicParams,
+        },
+        error::RpcError,
+        rpc::{types::SubstrateTxStatus, RpcSubscription, Subscription},
+        tx::TxProgress,
+        Config, Error, SubstrateConfig,
+    };
+
+    use serde_json::value::RawValue;
+
+    #[derive(Clone, Debug)]
+    struct MockClient;
+
+    impl OfflineClientT<PolkadotConfig> for MockClient {
+        fn metadata(&self) -> crate::Metadata {
+            panic!("just a mock impl to satisfy trait bounds")
+        }
+
+        fn genesis_hash(&self) -> <PolkadotConfig as crate::Config>::Hash {
+            panic!("just a mock impl to satisfy trait bounds")
+        }
+
+        fn runtime_version(&self) -> crate::rpc::types::RuntimeVersion {
+            panic!("just a mock impl to satisfy trait bounds")
+        }
     }
 
-    /// Return the hash of the extrinsic.
-    pub fn extrinsic_hash(&self) -> T::Hash {
-        self.ext_hash
+    type MockTxProgress = TxProgress<PolkadotConfig, MockClient>;
+    type MockHash = <WithExtrinsicParams<
+        SubstrateConfig,
+        BaseExtrinsicParams<SubstrateConfig, PlainTip>,
+    > as Config>::Hash;
+    type MockSubstrateTxStatus = SubstrateTxStatus<MockHash, MockHash>;
+
+    impl OnlineClientT<PolkadotConfig> for MockClient {
+        fn rpc(&self) -> &crate::rpc::Rpc<PolkadotConfig> {
+            panic!("just a mock impl to satisfy trait bounds")
+        }
     }
 
-    /// Return all of the events in the block that the transaction made it into.
-    pub fn all_events_in_block(&self) -> &events::Events<T> {
-        &self.events
+    #[tokio::test]
+    async fn wait_for_finalized_returns_err_when_usurped() {
+        let tx_progress = mock_tx_progress(vec![
+            SubstrateTxStatus::Ready,
+            SubstrateTxStatus::Usurped(Default::default()),
+        ]);
+        let finalized_result = tx_progress.wait_for_finalized().await;
+        assert!(matches!(
+            finalized_result,
+            Err(Error::Transaction(crate::error::TransactionError::Usurped))
+        ));
     }
 
-    /// Iterate over all of the raw events associated with this transaction.
-    ///
-    /// This works in the same way that [`events::Events::iter()`] does, with the
-    /// exception that it filters out events not related to the submitted extrinsic.
-    pub fn iter(&self) -> impl Iterator<Item = Result<EventDetails, Error>> + '_ {
-        self.events.iter().filter(|ev| {
-            ev.as_ref()
-                .map(|ev| ev.phase() == Phase::ApplyExtrinsic(self.ext_idx))
-                .unwrap_or(true) // Keep any errors.
-        })
+    #[tokio::test]
+    async fn wait_for_finalized_returns_err_when_dropped() {
+        let tx_progress =
+            mock_tx_progress(vec![SubstrateTxStatus::Ready, SubstrateTxStatus::Dropped]);
+        let finalized_result = tx_progress.wait_for_finalized().await;
+        assert!(matches!(
+            finalized_result,
+            Err(Error::Transaction(crate::error::TransactionError::Dropped))
+        ));
     }
 
-    /// Find all of the transaction events matching the event type provided as a generic parameter.
-    ///
-    /// This works in the same way that [`events::Events::find()`] does, with the
-    /// exception that it filters out events not related to the submitted extrinsic.
-    pub fn find<Ev: StaticEvent>(&self) -> impl Iterator<Item = Result<Ev, Error>> + '_ {
-        self.iter().filter_map(|ev| {
-            ev.and_then(|ev| ev.as_event::<Ev>().map_err(Into::into))
-                .transpose()
-        })
+    #[tokio::test]
+    async fn wait_for_finalized_returns_err_when_invalid() {
+        let tx_progress =
+            mock_tx_progress(vec![SubstrateTxStatus::Ready, SubstrateTxStatus::Invalid]);
+        let finalized_result = tx_progress.wait_for_finalized().await;
+        assert!(matches!(
+            finalized_result,
+            Err(Error::Transaction(crate::error::TransactionError::Invalid))
+        ));
     }
 
-    /// Iterate through the transaction events using metadata to dynamically decode and skip
-    /// them, and return the first event found which decodes to the provided `Ev` type.
-    ///
-    /// This works in the same way that [`events::Events::find_first()`] does, with the
-    /// exception that it ignores events not related to the submitted extrinsic.
-    pub fn find_first<Ev: StaticEvent>(&self) -> Result<Option<Ev>, Error> {
-        self.find::<Ev>().next().transpose()
+    fn mock_tx_progress(statuses: Vec<MockSubstrateTxStatus>) -> MockTxProgress {
+        let sub = create_substrate_tx_status_subscription(statuses);
+        TxProgress::new(sub, MockClient, Default::default())
     }
 
-    /// Find an event in those associated with this transaction. Returns true if it was found.
-    ///
-    /// This works in the same way that [`events::Events::has()`] does, with the
-    /// exception that it ignores events not related to the submitted extrinsic.
-    pub fn has<Ev: StaticEvent>(&self) -> Result<bool, Error> {
-        Ok(self.find::<Ev>().next().transpose()?.is_some())
+    fn create_substrate_tx_status_subscription(
+        elements: Vec<MockSubstrateTxStatus>,
+    ) -> Subscription<MockSubstrateTxStatus> {
+        let rpc_substription_stream: Pin<
+            Box<dyn Stream<Item = Result<Box<RawValue>, RpcError>> + Send + 'static>,
+        > = Box::pin(futures::stream::iter(elements.into_iter().map(|e| {
+            let s = serde_json::to_string(&e).unwrap();
+            let r: Box<RawValue> = RawValue::from_string(s).unwrap();
+            Ok(r)
+        })));
+
+        let rpc_subscription: RpcSubscription = RpcSubscription {
+            stream: rpc_substription_stream,
+            id: None,
+        };
+
+        let sub: Subscription<MockSubstrateTxStatus> = Subscription::new(rpc_subscription);
+        sub
     }
 }

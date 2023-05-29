@@ -1,4 +1,4 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
@@ -111,7 +111,6 @@
 
 #![deny(
     bad_style,
-    const_err,
     improper_ctypes,
     missing_docs,
     non_shorthand_field_patterns,
@@ -133,8 +132,23 @@
 )]
 #![allow(clippy::type_complexity)]
 
+// Suppress an unused dependency warning because tokio is
+// only used in example code snippets at the time of writing.
+#[cfg(test)]
+use tokio as _;
+
 pub use subxt_macro::subxt;
 
+// Used to enable the js feature for wasm.
+#[cfg(target_arch = "wasm32")]
+pub use getrandom as _;
+
+#[cfg(all(feature = "jsonrpsee-ws", feature = "jsonrpsee-web"))]
+std::compile_error!(
+    "Both the features `jsonrpsee-ws` and `jsonrpsee-web` are enabled which are mutually exclusive"
+);
+
+pub mod blocks;
 pub mod client;
 pub mod config;
 pub mod constants;
@@ -143,32 +157,30 @@ pub mod error;
 pub mod events;
 pub mod metadata;
 pub mod rpc;
+pub mod runtime_api;
 pub mod storage;
 pub mod tx;
 pub mod utils;
 
 // Expose a few of the most common types at root,
-// but leave most types behind their respoctive modules.
+// but leave most types behind their respective modules.
 pub use crate::{
-    client::{
-        OfflineClient,
-        OnlineClient,
-    },
-    config::{
-        Config,
-        PolkadotConfig,
-        SubstrateConfig,
-    },
+    client::{OfflineClient, OnlineClient},
+    config::{Config, PolkadotConfig, SubstrateConfig},
     error::Error,
     metadata::Metadata,
 };
 
 /// Re-export external crates that are made use of in the subxt API.
 pub mod ext {
-    pub use bitvec;
     pub use codec;
     pub use frame_metadata;
+    pub use scale_bits;
+    pub use scale_decode;
+    pub use scale_encode;
     pub use scale_value;
+    #[cfg(feature = "substrate-compat")]
     pub use sp_core;
+    #[cfg(feature = "substrate-compat")]
     pub use sp_runtime;
 }

@@ -1,4 +1,4 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
@@ -8,22 +8,16 @@ use crate::{
     node_runtime::{
         self,
         contracts::events,
+        runtime_types::{pallet_contracts::wasm::Determinism, sp_weights::weight_v2::Weight},
         system,
     },
-    test_context,
-    TestContext,
+    test_context, TestContext,
 };
 use sp_core::sr25519::Pair;
-use sp_runtime::MultiAddress;
 use subxt::{
-    tx::{
-        PairSigner,
-        TxProgress,
-    },
-    Config,
-    Error,
-    OnlineClient,
-    SubstrateConfig,
+    tx::{PairSigner, TxProgress},
+    utils::MultiAddress,
+    Config, Error, OnlineClient, SubstrateConfig,
 };
 
 struct ContractsTestContext {
@@ -33,6 +27,15 @@ struct ContractsTestContext {
 
 type Hash = <SubstrateConfig as Config>::Hash;
 type AccountId = <SubstrateConfig as Config>::AccountId;
+
+const CONTRACT: &str = r#"
+    (module
+        (func (export "call"))
+        (func (export "deploy"))
+    )
+"#;
+
+const PROOF_SIZE: u64 = u64::MAX / 2;
 
 impl ContractsTestContext {
     async fn init() -> Self {
@@ -46,19 +49,38 @@ impl ContractsTestContext {
         self.cxt.client()
     }
 
+    async fn upload_code(&self) -> Result<Hash, Error> {
+        let code = wabt::wat2wasm(CONTRACT).expect("invalid wabt");
+
+        let upload_tx =
+            node_runtime::tx()
+                .contracts()
+                .upload_code(code, None, Determinism::Enforced);
+
+        let events = self
+            .client()
+            .tx()
+            .sign_and_submit_then_watch_default(&upload_tx, &self.signer)
+            .await?
+            .wait_for_finalized_success()
+            .await?;
+
+        let code_stored = events
+            .find_first::<events::CodeStored>()?
+            .ok_or_else(|| Error::Other("Failed to find a CodeStored event".into()))?;
+        Ok(code_stored.code_hash)
+    }
+
     async fn instantiate_with_code(&self) -> Result<(Hash, AccountId), Error> {
         tracing::info!("instantiate_with_code:");
-        const CONTRACT: &str = r#"
-                (module
-                    (func (export "call"))
-                    (func (export "deploy"))
-                )
-            "#;
         let code = wabt::wat2wasm(CONTRACT).expect("invalid wabt");
 
         let instantiate_tx = node_runtime::tx().contracts().instantiate_with_code(
             100_000_000_000_000_000, // endowment
-            500_000_000_000,         // gas_limit
+            Weight {
+                ref_time: 500_000_000_000,
+                proof_size: PROOF_SIZE,
+            }, // gas_limit
             None,                    // storage_deposit_limit
             code,
             vec![], // data
@@ -81,9 +103,7 @@ impl ContractsTestContext {
             .ok_or_else(|| Error::Other("Failed to find a Instantiated event".into()))?;
         let _extrinsic_success = events
             .find_first::<system::events::ExtrinsicSuccess>()?
-            .ok_or_else(|| {
-                Error::Other("Failed to find a ExtrinsicSuccess event".into())
-            })?;
+            .ok_or_else(|| Error::Other("Failed to find a ExtrinsicSuccess event".into()))?;
 
         tracing::info!("  Block hash: {:?}", events.block_hash());
         tracing::info!("  Code hash: {:?}", code_stored.code_hash);
@@ -100,7 +120,10 @@ impl ContractsTestContext {
         // call instantiate extrinsic
         let instantiate_tx = node_runtime::tx().contracts().instantiate(
             100_000_000_000_000_000, // endowment
-            500_000_000_000,         // gas_limit
+            Weight {
+                ref_time: 500_000_000_000,
+                proof_size: PROOF_SIZE,
+            }, // gas_limit
             None,                    // storage_deposit_limit
             code_hash,
             data,
@@ -131,9 +154,12 @@ impl ContractsTestContext {
         tracing::info!("call: {:?}", contract);
         let call_tx = node_runtime::tx().contracts().call(
             MultiAddress::Id(contract),
-            0,           // value
-            500_000_000, // gas_limit
-            None,        // storage_deposit_limit
+            0, // value
+            Weight {
+                ref_time: 500_000_000,
+                proof_size: PROOF_SIZE,
+            }, // gas_limit
+            None, // storage_deposit_limit
             input_data,
         );
 
@@ -155,22 +181,20 @@ async fn tx_instantiate_with_code() {
 
     assert!(
         result.is_ok(),
-        "Error calling instantiate_with_code and receiving CodeStored and Instantiated Events: {:?}",
-        result
+        "Error calling instantiate_with_code and receiving CodeStored and Instantiated Events: {result:?}"
     );
 }
 
 #[tokio::test]
 async fn tx_instantiate() {
     let ctx = ContractsTestContext::init().await;
-    let (code_hash, _) = ctx.instantiate_with_code().await.unwrap();
+    let code_hash = ctx.upload_code().await.unwrap();
 
-    let instantiated = ctx.instantiate(code_hash, vec![], vec![1u8]).await;
+    let instantiated = ctx.instantiate(code_hash, vec![], vec![]).await;
 
     assert!(
         instantiated.is_ok(),
-        "Error instantiating contract: {:?}",
-        instantiated
+        "Error instantiating contract: {instantiated:?}"
     );
 }
 
@@ -183,21 +207,33 @@ async fn tx_call() {
         .contracts()
         .contract_info_of(&contract);
 
-    let contract_info = cxt.client().storage().fetch(&info_addr, None).await;
+    let info_addr_bytes = cxt.client().storage().address_bytes(&info_addr).unwrap();
+
+    let contract_info = cxt
+        .client()
+        .storage()
+        .at_latest()
+        .await
+        .unwrap()
+        .fetch(&info_addr)
+        .await;
     assert!(contract_info.is_ok());
 
     let keys = cxt
         .client()
         .storage()
-        .fetch_keys(&info_addr.to_bytes(), 10, None, None)
+        .at_latest()
+        .await
+        .unwrap()
+        .fetch_keys(&info_addr_bytes, 10, None)
         .await
         .unwrap()
         .iter()
         .map(|key| hex::encode(&key.0))
         .collect::<Vec<_>>();
-    println!("keys post: {:?}", keys);
+    println!("keys post: {keys:?}");
 
     let executed = cxt.call(contract, vec![]).await;
 
-    assert!(executed.is_ok(), "Error calling contract: {:?}", executed);
+    assert!(executed.is_ok(), "Error calling contract: {executed:?}");
 }

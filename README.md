@@ -47,6 +47,9 @@ Please add your project to this list via a PR.
 - [crunch](https://github.com/turboflakes/crunch) CLI to claim staking rewards in batch every Era or X hours for substrate-based chains.
 - [interbtc-clients](https://github.com/interlay/interbtc-clients) Client implementations for the interBTC parachain; notably the Vault / Relayer and Oracle.
 - [tidext](https://github.com/tidelabs/tidext) Tidechain client with Stronghold signer.
+- [staking-miner-v2](https://github.com/paritytech/staking-miner-v2) Submit NPos election solutions and get rewards.
+- [polkadot-introspector](https://github.com/paritytech/polkadot-introspector) Tools for monitoring Polkadot nodes.
+- [ink!](https://github.com/paritytech/ink) Smart contract language that uses `subxt` for allowing developers to conduct [End-to-End testing](https://use.ink/basics/contract-testing#end-to-end-e2e-tests) of their contracts.
 
 **Alternatives**
 

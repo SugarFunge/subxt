@@ -1,4 +1,4 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
@@ -21,7 +21,7 @@
 //! use std::fs;
 //! use codec::Decode;
 //! use frame_metadata::RuntimeMetadataPrefixed;
-//! use subxt_codegen::DerivesRegistry;
+//! use subxt_codegen::{CratePath, DerivesRegistry, TypeSubstitutes};
 //!
 //! let encoded = fs::read("../artifacts/polkadot_metadata.scale").unwrap();
 //!
@@ -32,28 +32,31 @@
 //!     pub mod api {}
 //! );
 //! // Default module derivatives.
-//! let mut derives = DerivesRegistry::default();
+//! let mut derives = DerivesRegistry::new(&CratePath::default());
+//! // Default type substitutes.
+//! let substs = TypeSubstitutes::new(&CratePath::default());
 //! // Generate the Runtime API.
 //! let generator = subxt_codegen::RuntimeGenerator::new(metadata);
-//! let runtime_api = generator.generate_runtime(item_mod, derives);
+//! // Include metadata documentation in the Runtime API.
+//! let generate_docs = true;
+//! let runtime_api = generator.generate_runtime(item_mod, derives, substs, CratePath::default(), generate_docs).unwrap();
 //! println!("{}", runtime_api);
 //! ```
 
-#![deny(unused_crate_dependencies)]
+#![deny(unused_crate_dependencies, missing_docs)]
 
 mod api;
+mod error;
 mod ir;
 mod types;
 
+pub mod utils;
+
 pub use self::{
     api::{
-        generate_runtime_api,
-        RuntimeGenerator,
+        generate_runtime_api_from_bytes, generate_runtime_api_from_path,
+        generate_runtime_api_from_url, RuntimeGenerator,
     },
-    types::{
-        Derives,
-        DerivesRegistry,
-        Module,
-        TypeGenerator,
-    },
+    error::{CodegenError, TypeSubstitutionError},
+    types::{CratePath, Derives, DerivesRegistry, Module, TypeGenerator, TypeSubstitutes},
 };

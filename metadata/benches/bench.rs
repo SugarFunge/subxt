@@ -1,29 +1,14 @@
-// Copyright 2019-2022 Parity Technologies (UK) Ltd.
+// Copyright 2019-2023 Parity Technologies (UK) Ltd.
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
 use codec::Decode;
 use criterion::*;
-use frame_metadata::{
-    RuntimeMetadata::V14,
-    RuntimeMetadataPrefixed,
-    RuntimeMetadataV14,
-};
-use scale_info::{
-    form::PortableForm,
-    TypeDef,
-    TypeDefVariant,
-};
-use std::{
-    fs,
-    path::Path,
-};
+use frame_metadata::{RuntimeMetadata::V14, RuntimeMetadataPrefixed, RuntimeMetadataV14};
+use scale_info::{form::PortableForm, TypeDef, TypeDefVariant};
+use std::{fs, path::Path};
 use subxt_metadata::{
-    get_call_hash,
-    get_constant_hash,
-    get_metadata_hash,
-    get_pallet_hash,
-    get_storage_hash,
+    get_call_hash, get_constant_hash, get_metadata_hash, get_pallet_hash, get_storage_hash,
 };
 
 fn load_metadata() -> RuntimeMetadataV14 {
@@ -72,14 +57,14 @@ fn bench_get_call_hash(c: &mut Criterion) {
     for pallet in metadata.pallets.iter() {
         let pallet_name = &pallet.name;
         let call_type_id = match &pallet.calls {
-            Some(calls) => calls.ty.id(),
+            Some(calls) => calls.ty.id,
             None => continue,
         };
         let call_type = metadata.types.resolve(call_type_id).unwrap();
-        let variants = expect_variant(call_type.type_def());
+        let variants = expect_variant(&call_type.type_def);
 
-        for variant in variants.variants() {
-            let call_name = variant.name();
+        for variant in &variants.variants {
+            let call_name = &variant.name;
             let bench_name = format!("{pallet_name}/{call_name}");
             group.bench_function(&bench_name, |b| {
                 b.iter(|| get_call_hash(&metadata, &pallet.name, call_name))
