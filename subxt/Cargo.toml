@@ -82,8 +82,8 @@ either = { workspace = true }
 
 # Provides some deserialization, types like U256/H256 and hashing impls like twox/blake256:
 impl-serde = { workspace = true }
-primitive-types = { workspace = true }
-sp-core-hashing = { workspace = true }
+primitive-types = { workspace = true, default-features = false, features = ["codec", "scale-info", "serde"] }
+sp-core-hashing = { workspace = true,  git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43" }
 
 # For ss58 encoding AccountId32 to serialize them properly:
 base58 = { workspace = true }
@@ -93,8 +93,8 @@ blake2 = { workspace = true }
 jsonrpsee = { workspace = true, optional = true, features = ["jsonrpsee-types"] }
 
 # Included if the "substrate-compat" feature is enabled.
-sp-core = { workspace = true, optional = true }
-sp-runtime = { workspace = true, optional = true }
+sp-core = { workspace = true, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43", default-features = false, optional = true }
+sp-runtime = { workspace = true,  git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43", default-features = false, optional = true }
 
 # Other subxt crates we depend on.
 subxt-macro = { workspace = true }
