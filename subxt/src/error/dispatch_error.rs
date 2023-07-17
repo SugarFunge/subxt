@@ -7,8 +7,10 @@
 
 use crate::metadata::{DecodeWithMetadata, Metadata};
 use core::fmt::Debug;
-use scale_decode::visitor::DecodeAsTypeResult;
+use scale_decode::{visitor::DecodeAsTypeResult, DecodeAsType};
 use std::borrow::Cow;
+
+use super::{Error, MetadataError};
 
 /// An error dispatching a transaction.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -124,60 +126,78 @@ pub enum TransactionalError {
 #[non_exhaustive]
 pub struct ModuleError {
     metadata: Metadata,
-    raw: RawModuleError,
+    /// Bytes representation:
+    ///  - `bytes[0]`:   pallet index
+    ///  - `bytes[1]`:   error index
+    ///  - `bytes[2..]`: 3 bytes specific for the module error
+    bytes: [u8; 5],
 }
 
 impl PartialEq for ModuleError {
     fn eq(&self, other: &Self) -> bool {
         // A module error is the same if the raw underlying details are the same.
-        self.raw == other.raw
+        self.bytes == other.bytes
     }
 }
+
 impl Eq for ModuleError {}
 
 impl std::fmt::Display for ModuleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Ok(details) = self.details() else {
-            return f.write_str("Unknown pallet error (pallet and error details cannot be retrieved)")
+            return f.write_str("Unknown pallet error (pallet and error details cannot be retrieved)");
         };
 
-        let pallet = details.pallet();
-        let error = details.error();
+        let pallet = details.pallet.name();
+        let error = &details.variant.name;
         write!(f, "Pallet error {pallet}::{error}")
     }
 }
 
 impl ModuleError {
     /// Return more details about this error.
-    pub fn details(&self) -> Result<&crate::metadata::ErrorMetadata, super::Error> {
-        let error_details = self
-            .metadata
-            .error(self.raw.pallet_index, self.raw.error[0])?;
-        Ok(error_details)
+    pub fn details(&self) -> Result<ModuleErrorDetails, MetadataError> {
+        let pallet = self.metadata.pallet_by_index_err(self.pallet_index())?;
+        let variant = pallet
+            .error_variant_by_index(self.error_index())
+            .ok_or_else(|| MetadataError::VariantIndexNotFound(self.error_index()))?;
+
+        Ok(ModuleErrorDetails { pallet, variant })
     }
+
     /// Return the underlying module error data that was decoded.
-    pub fn raw(&self) -> RawModuleError {
-        self.raw
+    pub fn bytes(&self) -> [u8; 5] {
+        self.bytes
     }
-}
 
-/// The error details about a module error that has occurred.
-///
-/// **Note**: Structure used to obtain the underlying bytes of a ModuleError.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RawModuleError {
-    /// Index of the pallet that the error came from.
-    pub pallet_index: u8,
-    /// Raw error bytes.
-    pub error: [u8; 4],
-}
+    /// Obtain the pallet index from the underlying byte data.
+    pub fn pallet_index(&self) -> u8 {
+        self.bytes[0]
+    }
 
-impl RawModuleError {
     /// Obtain the error index from the underlying byte data.
     pub fn error_index(&self) -> u8 {
-        // Error index is utilized as the first byte from the error array.
-        self.error[0]
+        self.bytes[1]
     }
+
+    /// Attempts to decode the ModuleError into the top outer Error enum.
+    pub fn as_root_error<E: DecodeAsType>(&self) -> Result<E, Error> {
+        let decoded = E::decode_as_type(
+            &mut &self.bytes[..],
+            self.metadata.outer_enums().error_enum_ty(),
+            self.metadata.types(),
+        )?;
+
+        Ok(decoded)
+    }
+}
+
+/// Details about the module error.
+pub struct ModuleErrorDetails<'a> {
+    /// The pallet that the error came from
+    pub pallet: crate::metadata::types::PalletMetadata<'a>,
+    /// The variant representing the error
+    pub variant: &'a scale_info::Variant<scale_info::form::PortableForm>,
 }
 
 impl DispatchError {
@@ -188,16 +208,9 @@ impl DispatchError {
         metadata: Metadata,
     ) -> Result<Self, super::Error> {
         let bytes = bytes.into();
-
-        let dispatch_error_ty_id = match metadata.dispatch_error_ty() {
-            Some(id) => id,
-            None => {
-                tracing::warn!(
-                    "Can't decode error: sp_runtime::DispatchError was not found in Metadata"
-                );
-                return Err(super::Error::Unknown(bytes.into_owned()));
-            }
-        };
+        let dispatch_error_ty_id = metadata
+            .dispatch_error_ty()
+            .ok_or(MetadataError::DispatchErrorNotFound)?;
 
         // The aim is to decode our bytes into roughly this shape. This is copied from
         // `sp_runtime::DispatchError`; we need the variant names and any inner variant
@@ -272,21 +285,16 @@ impl DispatchError {
 
                 // The old version is 2 bytes; a pallet and error index.
                 // The new version is 5 bytes; a pallet and error index and then 3 extra bytes.
-                let raw = if module_bytes.len() == 2 {
-                    RawModuleError {
-                        pallet_index: module_bytes[0],
-                        error: [module_bytes[1], 0, 0, 0],
-                    }
+                let bytes = if module_bytes.len() == 2 {
+                    [module_bytes[0], module_bytes[1], 0, 0, 0]
                 } else if module_bytes.len() == 5 {
-                    RawModuleError {
-                        pallet_index: module_bytes[0],
-                        error: [
-                            module_bytes[1],
-                            module_bytes[2],
-                            module_bytes[3],
-                            module_bytes[4],
-                        ],
-                    }
+                    [
+                        module_bytes[0],
+                        module_bytes[1],
+                        module_bytes[2],
+                        module_bytes[3],
+                        module_bytes[4],
+                    ]
                 } else {
                     tracing::warn!("Can't decode error sp_runtime::DispatchError: bytes do not match known shapes");
                     // Return _all_ of the bytes; every "unknown" return should be consistent.
@@ -294,7 +302,7 @@ impl DispatchError {
                 };
 
                 // And return our outward-facing version:
-                DispatchError::Module(ModuleError { metadata, raw })
+                DispatchError::Module(ModuleError { metadata, bytes })
             }
         };
 

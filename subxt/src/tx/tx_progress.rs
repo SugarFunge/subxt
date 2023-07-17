@@ -6,6 +6,7 @@
 
 use std::task::Poll;
 
+use crate::utils::strip_compact_prefix;
 use crate::{
     client::OnlineClientT,
     error::{DispatchError, Error, RpcError, TransactionError},
@@ -80,7 +81,7 @@ where
                 TxStatus::InBlock(s) | TxStatus::Finalized(s) => return Ok(s),
                 // Error scenarios; return the error.
                 TxStatus::FinalityTimeout(_) => {
-                    return Err(TransactionError::FinalityTimeout.into())
+                    return Err(TransactionError::FinalityTimeout.into());
                 }
                 TxStatus::Invalid => return Err(TransactionError::Invalid.into()),
                 TxStatus::Usurped(_) => return Err(TransactionError::Usurped.into()),
@@ -109,7 +110,7 @@ where
                 TxStatus::Finalized(s) => return Ok(s),
                 // Error scenarios; return the error.
                 TxStatus::FinalityTimeout(_) => {
-                    return Err(TransactionError::FinalityTimeout.into())
+                    return Err(TransactionError::FinalityTimeout.into());
                 }
                 TxStatus::Invalid => return Err(TransactionError::Invalid.into()),
                 TxStatus::Usurped(_) => return Err(TransactionError::Usurped.into()),
@@ -260,7 +261,6 @@ impl<T: Config, C: Clone> Stream for TxProgress<T, C> {
 /// In any of these cases the client side TxProgress stream is also closed.
 /// In those cases the stream is closed however, so you currently have no way to find
 /// out if they finally made it into a block or not.
-
 #[derive(Derivative)]
 #[derivative(Debug(bound = "C: std::fmt::Debug"))]
 pub enum TxStatus<T: Config, C> {
@@ -389,7 +389,10 @@ impl<T: Config, C: OnlineClientT<T>> TxInBlock<T, C> {
             .iter()
             .position(|ext| {
                 use crate::config::Hasher;
-                let hash = T::Hasher::hash_of(&ext.0);
+                let Ok((_,stripped)) = strip_compact_prefix(&ext.0) else {
+                    return false;
+                };
+                let hash = T::Hasher::hash_of(&stripped);
                 hash == self.ext_hash
             })
             // If we successfully obtain the block hash we think contains our
@@ -416,11 +419,7 @@ mod test {
 
     use crate::{
         client::{OfflineClientT, OnlineClientT},
-        config::{
-            extrinsic_params::BaseExtrinsicParams,
-            polkadot::{PlainTip, PolkadotConfig},
-            WithExtrinsicParams,
-        },
+        config::{extrinsic_params::BaseExtrinsicParams, polkadot::PlainTip, WithExtrinsicParams},
         error::RpcError,
         rpc::{types::SubstrateTxStatus, RpcSubscription, Subscription},
         tx::TxProgress,
@@ -429,15 +428,23 @@ mod test {
 
     use serde_json::value::RawValue;
 
+    type MockTxProgress = TxProgress<SubstrateConfig, MockClient>;
+    type MockHash = <WithExtrinsicParams<
+        SubstrateConfig,
+        BaseExtrinsicParams<SubstrateConfig, PlainTip>,
+    > as Config>::Hash;
+    type MockSubstrateTxStatus = SubstrateTxStatus<MockHash, MockHash>;
+
+    /// a mock client to satisfy trait bounds in tests
     #[derive(Clone, Debug)]
     struct MockClient;
 
-    impl OfflineClientT<PolkadotConfig> for MockClient {
+    impl OfflineClientT<SubstrateConfig> for MockClient {
         fn metadata(&self) -> crate::Metadata {
             panic!("just a mock impl to satisfy trait bounds")
         }
 
-        fn genesis_hash(&self) -> <PolkadotConfig as crate::Config>::Hash {
+        fn genesis_hash(&self) -> <SubstrateConfig as crate::Config>::Hash {
             panic!("just a mock impl to satisfy trait bounds")
         }
 
@@ -446,15 +453,8 @@ mod test {
         }
     }
 
-    type MockTxProgress = TxProgress<PolkadotConfig, MockClient>;
-    type MockHash = <WithExtrinsicParams<
-        SubstrateConfig,
-        BaseExtrinsicParams<SubstrateConfig, PlainTip>,
-    > as Config>::Hash;
-    type MockSubstrateTxStatus = SubstrateTxStatus<MockHash, MockHash>;
-
-    impl OnlineClientT<PolkadotConfig> for MockClient {
-        fn rpc(&self) -> &crate::rpc::Rpc<PolkadotConfig> {
+    impl OnlineClientT<SubstrateConfig> for MockClient {
+        fn rpc(&self) -> &crate::rpc::Rpc<SubstrateConfig> {
             panic!("just a mock impl to satisfy trait bounds")
         }
     }

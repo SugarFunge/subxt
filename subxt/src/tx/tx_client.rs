@@ -2,17 +2,19 @@
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
-use super::TxPayload;
+use std::borrow::Cow;
+
+use codec::{Compact, Encode};
+use derivative::Derivative;
+use sp_core_hashing::blake2_256;
+
 use crate::{
     client::{OfflineClientT, OnlineClientT},
     config::{Config, ExtrinsicParams, Hasher},
-    error::Error,
-    tx::{Signer as SignerT, TxProgress},
+    error::{Error, MetadataError},
+    tx::{Signer as SignerT, TxPayload, TxProgress},
     utils::{Encoded, PhantomDataSendSync},
 };
-use codec::{Compact, Encode};
-use derivative::Derivative;
-use std::borrow::Cow;
 
 // This is returned from an API below, so expose it here.
 pub use crate::rpc::types::DryRunResult;
@@ -45,14 +47,15 @@ impl<T: Config, C: OfflineClientT<T>> TxClient<T, C> {
         Call: TxPayload,
     {
         if let Some(details) = call.validation_details() {
-            let metadata = self.client.metadata();
-            let expected_hash = metadata.call_hash(details.pallet_name, details.call_name)?;
+            let expected_hash = self
+                .client
+                .metadata()
+                .pallet_by_name_err(details.pallet_name)?
+                .call_hash(details.call_name)
+                .ok_or_else(|| MetadataError::CallNameNotFound(details.call_name.to_owned()))?;
+
             if details.hash != expected_hash {
-                return Err(crate::metadata::MetadataError::IncompatibleCallMetadata(
-                    details.pallet_name.into(),
-                    details.call_name.into(),
-                )
-                .into());
+                return Err(MetadataError::IncompatibleCodegen.into());
             }
         }
         Ok(())
@@ -171,11 +174,15 @@ where
     T: Config,
     C: OnlineClientT<T>,
 {
-    // Get the next account nonce to use.
-    async fn next_account_nonce(&self, account_id: &T::AccountId) -> Result<T::Index, Error> {
+    /// Get the account nonce for a given account ID.
+    pub async fn account_nonce(&self, account_id: &T::AccountId) -> Result<T::Index, Error> {
         self.client
             .rpc()
-            .system_account_next_index(account_id)
+            .state_call(
+                "AccountNonceApi_account_nonce",
+                Some(&account_id.encode()),
+                None,
+            )
             .await
     }
 
@@ -189,7 +196,7 @@ where
     where
         Call: TxPayload,
     {
-        let account_nonce = self.next_account_nonce(account_id).await?;
+        let account_nonce = self.account_nonce(account_id).await?;
         self.create_partial_signed_with_nonce(call, account_nonce, other_params)
     }
 
@@ -204,7 +211,7 @@ where
         Call: TxPayload,
         Signer: SignerT<T>,
     {
-        let account_nonce = self.next_account_nonce(signer.account_id()).await?;
+        let account_nonce = self.account_nonce(&signer.account_id()).await?;
         self.create_signed_with_nonce(call, signer, account_nonce, other_params)
     }
 
@@ -319,7 +326,7 @@ where
         self.additional_and_extra_params
             .encode_additional_to(&mut bytes);
         if bytes.len() > 256 {
-            f(Cow::Borrowed(T::Hasher::hash_of(&Encoded(bytes)).as_ref()))
+            f(Cow::Borrowed(blake2_256(&bytes).as_ref()))
         } else {
             f(Cow::Owned(bytes))
         }
@@ -354,10 +361,10 @@ where
     /// An address, and something representing a signature that can be SCALE encoded, are both
     /// needed in order to construct it. If you have a `Signer` to hand, you can use
     /// [`PartialExtrinsic::sign()`] instead.
-    pub fn sign_with_address_and_signature<S: Encode>(
+    pub fn sign_with_address_and_signature(
         &self,
         address: &T::Address,
-        signature: &S,
+        signature: &T::Signature,
     ) -> SubmittableExtrinsic<T, C> {
         // Encode the extrinsic (into the format expected by protocol version 4)
         let extrinsic = {
@@ -464,5 +471,24 @@ where
     pub async fn dry_run(&self, at: Option<T::Hash>) -> Result<DryRunResult, Error> {
         let dry_run_bytes = self.client.rpc().dry_run(self.encoded(), at).await?;
         dry_run_bytes.into_dry_run_result(&self.client.metadata())
+    }
+
+    /// This returns an estimate for what the extrinsic is expected to cost to execute, less any tips.
+    /// The actual amount paid can vary from block to block based on node traffic and other factors.
+    pub async fn partial_fee_estimate(&self) -> Result<u128, Error> {
+        let mut params = self.encoded().to_vec();
+        (self.encoded().len() as u32).encode_to(&mut params);
+        // destructuring RuntimeDispatchInfo, see type information <https://paritytech.github.io/substrate/master/pallet_transaction_payment_rpc_runtime_api/struct.RuntimeDispatchInfo.html>
+        // data layout: {weight_ref_time: Compact<u64>, weight_proof_size: Compact<u64>, class: u8, partial_fee: u128}
+        let (_, _, _, partial_fee) = self
+            .client
+            .rpc()
+            .state_call::<(Compact<u64>, Compact<u64>, u8, u128)>(
+                "TransactionPaymentApi_query_info",
+                Some(&params),
+                None,
+            )
+            .await?;
+        Ok(partial_fee)
     }
 }
