@@ -93,8 +93,8 @@ blake2 = { workspace = true }
 jsonrpsee = { workspace = true, optional = true, features = ["jsonrpsee-types"] }
 
 # Included if the "substrate-compat" feature is enabled.
-sp-core = { workspace = true, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43", default-features = false }
-sp-runtime = { workspace = true,  git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43" }
+sp-core = { workspace = true, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43", default-features = false, optional = true }
+sp-runtime = { workspace = true,  git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43", optional = true}
 
 # Other subxt crates we depend on.
 subxt-macro = { workspace = true }
