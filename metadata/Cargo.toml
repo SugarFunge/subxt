@@ -17,7 +17,7 @@ description = "Command line utilities for checking metadata compatibility betwee
 codec = { package = "parity-scale-codec", workspace = true, features = ["derive"] }
 frame-metadata = { workspace = true }
 scale-info = { workspace = true }
-sp-core-hashing = { workspace = true, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43"  }
+sp-core-hashing = { workspace = true, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
