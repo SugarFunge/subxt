@@ -2,845 +2,688 @@
 // This file is dual-licensed as Apache-2.0 or GPL-3.0.
 // see LICENSE for license details.
 
-mod retain;
+//! A representation of the metadata provided by a substrate based node.
+//! This representation is optimized to be used by Subxt and related crates,
+//! and is independent of the different versions of metadata that can be
+//! provided from a node.
+//!
+//! Typically, this will be constructed by either:
+//!
+//! 1. Calling `Metadata::decode()` given some metadata bytes obtained
+//!    from a node (this uses [`codec::Decode`]).
+//! 2. Obtaining [`frame_metadata::RuntimeMetadataPrefixed`], and then
+//!    using `.try_into()` to convert it into [`Metadata`].
 
-use frame_metadata::{
-    ExtrinsicMetadata, RuntimeMetadataV14, StorageEntryMetadata, StorageEntryType,
-};
-pub use retain::retain_metadata_pallets;
-use scale_info::{form::PortableForm, Field, PortableRegistry, TypeDef, Variant};
-use std::collections::HashSet;
+#![deny(missing_docs)]
 
-/// Internal byte representation for various metadata types utilized for
-/// generating deterministic hashes between different rust versions.
-#[repr(u8)]
-enum TypeBeingHashed {
-    Composite,
-    Variant,
-    Sequence,
-    Array,
-    Tuple,
-    Primitive,
-    Compact,
-    BitSequence,
+mod from_into;
+mod utils;
+
+use scale_info::{form::PortableForm, PortableRegistry, Variant};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use utils::ordered_map::OrderedMap;
+use utils::variant_index::VariantIndex;
+
+type ArcStr = Arc<str>;
+
+pub use from_into::TryFromError;
+pub use utils::validation::MetadataHasher;
+
+/// Node metadata. This can be constructed by providing some compatible [`frame_metadata`]
+/// which is then decoded into this. We aim to preserve all of the existing information in
+/// the incoming metadata while optimizing the format a little for Subxt's use cases.
+#[derive(Debug, Clone)]
+pub struct Metadata {
+    /// Type registry containing all types used in the metadata.
+    types: PortableRegistry,
+    /// Metadata of all the pallets.
+    pallets: OrderedMap<ArcStr, PalletMetadataInner>,
+    /// Find the location in the pallet Vec by pallet index.
+    pallets_by_index: HashMap<u8, usize>,
+    /// Metadata of the extrinsic.
+    extrinsic: ExtrinsicMetadata,
+    /// The type ID of the `Runtime` type.
+    runtime_ty: u32,
+    /// The types of the outer enums.
+    outer_enums: OuterEnumsMetadata,
+    /// The type Id of the `DispatchError` type, which Subxt makes use of.
+    dispatch_error_ty: Option<u32>,
+    /// Details about each of the runtime API traits.
+    apis: OrderedMap<ArcStr, RuntimeApiMetadataInner>,
 }
 
-/// Hashing function utilized internally.
-fn hash(data: &[u8]) -> [u8; 32] {
-    sp_core_hashing::twox_256(data)
-}
-
-/// XOR two hashes together. If we have two pseudorandom hashes, then this will
-/// lead to another pseudorandom value. If there is potentially some pattern to
-/// the hashes we are xoring (eg we might be xoring the same hashes a few times),
-/// prefer `hash_hashes` to give us stronger pseudorandomness guarantees.
-fn xor(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (idx, (a, b)) in a.into_iter().zip(b).enumerate() {
-        out[idx] = a ^ b;
-    }
-    out
-}
-
-/// Combine two hashes or hash-like sets of bytes together into a single hash.
-/// `xor` is OK for one-off combinations of bytes, but if we are merging
-/// potentially identical hashes, this is a safer way to ensure the result is
-/// unique.
-fn hash_hashes(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32 * 2];
-    for (idx, byte) in a.into_iter().chain(b).enumerate() {
-        out[idx] = byte;
-    }
-    hash(&out)
-}
-
-/// Obtain the hash representation of a `scale_info::Field`.
-fn get_field_hash(
-    registry: &PortableRegistry,
-    field: &Field<PortableForm>,
-    visited_ids: &mut HashSet<u32>,
-) -> [u8; 32] {
-    let mut bytes = get_type_hash(registry, field.ty.id, visited_ids);
-
-    // XOR name and field name with the type hash if they exist
-    if let Some(name) = &field.name {
-        bytes = xor(bytes, hash(name.as_bytes()));
+impl Metadata {
+    /// Access the underlying type registry.
+    pub fn types(&self) -> &PortableRegistry {
+        &self.types
     }
 
-    bytes
-}
-
-/// Obtain the hash representation of a `scale_info::Variant`.
-fn get_variant_hash(
-    registry: &PortableRegistry,
-    var: &Variant<PortableForm>,
-    visited_ids: &mut HashSet<u32>,
-) -> [u8; 32] {
-    // Merge our hashes of the name and each field together using xor.
-    let mut bytes = hash(var.name.as_bytes());
-    for field in &var.fields {
-        bytes = hash_hashes(bytes, get_field_hash(registry, field, visited_ids))
+    /// Mutable access to the underlying type registry.
+    pub fn types_mut(&mut self) -> &mut PortableRegistry {
+        &mut self.types
     }
 
-    bytes
-}
-
-/// Obtain the hash representation of a `scale_info::TypeDef`.
-fn get_type_def_hash(
-    registry: &PortableRegistry,
-    ty_def: &TypeDef<PortableForm>,
-    visited_ids: &mut HashSet<u32>,
-) -> [u8; 32] {
-    match ty_def {
-        TypeDef::Composite(composite) => {
-            let mut bytes = hash(&[TypeBeingHashed::Composite as u8]);
-            for field in &composite.fields {
-                bytes = hash_hashes(bytes, get_field_hash(registry, field, visited_ids));
-            }
-            bytes
-        }
-        TypeDef::Variant(variant) => {
-            let mut bytes = hash(&[TypeBeingHashed::Variant as u8]);
-            for var in &variant.variants {
-                bytes = hash_hashes(bytes, get_variant_hash(registry, var, visited_ids));
-            }
-            bytes
-        }
-        TypeDef::Sequence(sequence) => {
-            let bytes = hash(&[TypeBeingHashed::Sequence as u8]);
-            xor(
-                bytes,
-                get_type_hash(registry, sequence.type_param.id, visited_ids),
-            )
-        }
-        TypeDef::Array(array) => {
-            // Take length into account; different length must lead to different hash.
-            let len_bytes = array.len.to_be_bytes();
-            let bytes = hash(&[
-                TypeBeingHashed::Array as u8,
-                len_bytes[0],
-                len_bytes[1],
-                len_bytes[2],
-                len_bytes[3],
-            ]);
-            xor(
-                bytes,
-                get_type_hash(registry, array.type_param.id, visited_ids),
-            )
-        }
-        TypeDef::Tuple(tuple) => {
-            let mut bytes = hash(&[TypeBeingHashed::Tuple as u8]);
-            for field in &tuple.fields {
-                bytes = hash_hashes(bytes, get_type_hash(registry, field.id, visited_ids));
-            }
-            bytes
-        }
-        TypeDef::Primitive(primitive) => {
-            // Cloning the 'primitive' type should essentially be a copy.
-            hash(&[TypeBeingHashed::Primitive as u8, primitive.clone() as u8])
-        }
-        TypeDef::Compact(compact) => {
-            let bytes = hash(&[TypeBeingHashed::Compact as u8]);
-            xor(
-                bytes,
-                get_type_hash(registry, compact.type_param.id, visited_ids),
-            )
-        }
-        TypeDef::BitSequence(bitseq) => {
-            let mut bytes = hash(&[TypeBeingHashed::BitSequence as u8]);
-            bytes = xor(
-                bytes,
-                get_type_hash(registry, bitseq.bit_order_type.id, visited_ids),
-            );
-            bytes = xor(
-                bytes,
-                get_type_hash(registry, bitseq.bit_store_type.id, visited_ids),
-            );
-            bytes
-        }
-    }
-}
-
-/// Obtain the hash representation of a `scale_info::Type` identified by id.
-fn get_type_hash(registry: &PortableRegistry, id: u32, visited_ids: &mut HashSet<u32>) -> [u8; 32] {
-    // Guard against recursive types and return a fixed arbitrary hash
-    if !visited_ids.insert(id) {
-        return hash(&[123u8]);
+    /// The type ID of the `Runtime` type.
+    pub fn runtime_ty(&self) -> u32 {
+        self.runtime_ty
     }
 
-    let ty = registry.resolve(id).unwrap();
-    get_type_def_hash(registry, &ty.type_def, visited_ids)
-}
-
-/// Obtain the hash representation of a `frame_metadata::ExtrinsicMetadata`.
-fn get_extrinsic_hash(
-    registry: &PortableRegistry,
-    extrinsic: &ExtrinsicMetadata<PortableForm>,
-) -> [u8; 32] {
-    let mut visited_ids = HashSet::<u32>::new();
-
-    let mut bytes = get_type_hash(registry, extrinsic.ty.id, &mut visited_ids);
-
-    bytes = xor(bytes, hash(&[extrinsic.version]));
-    for signed_extension in extrinsic.signed_extensions.iter() {
-        let mut ext_bytes = hash(signed_extension.identifier.as_bytes());
-        ext_bytes = xor(
-            ext_bytes,
-            get_type_hash(registry, signed_extension.ty.id, &mut visited_ids),
-        );
-        ext_bytes = xor(
-            ext_bytes,
-            get_type_hash(
-                registry,
-                signed_extension.additional_signed.id,
-                &mut visited_ids,
-            ),
-        );
-        bytes = hash_hashes(bytes, ext_bytes);
+    /// The type ID of the `DispatchError` type, if it exists.
+    pub fn dispatch_error_ty(&self) -> Option<u32> {
+        self.dispatch_error_ty
     }
 
-    bytes
-}
-
-/// Get the hash corresponding to a single storage entry.
-fn get_storage_entry_hash(
-    registry: &PortableRegistry,
-    entry: &StorageEntryMetadata<PortableForm>,
-    visited_ids: &mut HashSet<u32>,
-) -> [u8; 32] {
-    let mut bytes = hash(entry.name.as_bytes());
-    // Cloning 'entry.modifier' should essentially be a copy.
-    bytes = xor(bytes, hash(&[entry.modifier.clone() as u8]));
-    bytes = xor(bytes, hash(&entry.default));
-
-    match &entry.ty {
-        StorageEntryType::Plain(ty) => {
-            bytes = xor(bytes, get_type_hash(registry, ty.id, visited_ids));
-        }
-        StorageEntryType::Map {
-            hashers,
-            key,
-            value,
-        } => {
-            for hasher in hashers {
-                // Cloning the hasher should essentially be a copy.
-                bytes = hash_hashes(bytes, [hasher.clone() as u8; 32]);
-            }
-            bytes = xor(bytes, get_type_hash(registry, key.id, visited_ids));
-            bytes = xor(bytes, get_type_hash(registry, value.id, visited_ids));
-        }
+    /// Return details about the extrinsic format.
+    pub fn extrinsic(&self) -> &ExtrinsicMetadata {
+        &self.extrinsic
     }
 
-    bytes
-}
-
-/// Obtain the hash for a specific storage item, or an error if it's not found.
-pub fn get_storage_hash(
-    metadata: &RuntimeMetadataV14,
-    pallet_name: &str,
-    storage_name: &str,
-) -> Result<[u8; 32], NotFound> {
-    let pallet = metadata
-        .pallets
-        .iter()
-        .find(|p| p.name == pallet_name)
-        .ok_or(NotFound::Pallet)?;
-
-    let storage = pallet.storage.as_ref().ok_or(NotFound::Item)?;
-
-    let entry = storage
-        .entries
-        .iter()
-        .find(|s| s.name == storage_name)
-        .ok_or(NotFound::Item)?;
-
-    let hash = get_storage_entry_hash(&metadata.types, entry, &mut HashSet::new());
-    Ok(hash)
-}
-
-/// Obtain the hash for a specific constant, or an error if it's not found.
-pub fn get_constant_hash(
-    metadata: &RuntimeMetadataV14,
-    pallet_name: &str,
-    constant_name: &str,
-) -> Result<[u8; 32], NotFound> {
-    let pallet = metadata
-        .pallets
-        .iter()
-        .find(|p| p.name == pallet_name)
-        .ok_or(NotFound::Pallet)?;
-
-    let constant = pallet
-        .constants
-        .iter()
-        .find(|c| c.name == constant_name)
-        .ok_or(NotFound::Item)?;
-
-    // We only need to check that the type of the constant asked for matches.
-    let bytes = get_type_hash(&metadata.types, constant.ty.id, &mut HashSet::new());
-    Ok(bytes)
-}
-
-/// Obtain the hash for a specific call, or an error if it's not found.
-pub fn get_call_hash(
-    metadata: &RuntimeMetadataV14,
-    pallet_name: &str,
-    call_name: &str,
-) -> Result<[u8; 32], NotFound> {
-    let pallet = metadata
-        .pallets
-        .iter()
-        .find(|p| p.name == pallet_name)
-        .ok_or(NotFound::Pallet)?;
-
-    let call_id = pallet.calls.as_ref().ok_or(NotFound::Item)?.ty.id;
-
-    let call_ty = metadata.types.resolve(call_id).ok_or(NotFound::Item)?;
-
-    let call_variants = match &call_ty.type_def {
-        TypeDef::Variant(variant) => &variant.variants,
-        _ => return Err(NotFound::Item),
-    };
-
-    let variant = call_variants
-        .iter()
-        .find(|v| v.name == call_name)
-        .ok_or(NotFound::Item)?;
-
-    // hash the specific variant representing the call we are interested in.
-    let hash = get_variant_hash(&metadata.types, variant, &mut HashSet::new());
-    Ok(hash)
-}
-
-/// Obtain the hash representation of a `frame_metadata::PalletMetadata`.
-pub fn get_pallet_hash(
-    registry: &PortableRegistry,
-    pallet: &frame_metadata::PalletMetadata<PortableForm>,
-) -> [u8; 32] {
-    // Begin with some arbitrary hash (we don't really care what it is).
-    let mut bytes = hash(&[19]);
-    let mut visited_ids = HashSet::<u32>::new();
-
-    if let Some(calls) = &pallet.calls {
-        bytes = xor(
-            bytes,
-            get_type_hash(registry, calls.ty.id, &mut visited_ids),
-        );
-    }
-    if let Some(ref event) = pallet.event {
-        bytes = xor(
-            bytes,
-            get_type_hash(registry, event.ty.id, &mut visited_ids),
-        );
-    }
-    for constant in pallet.constants.iter() {
-        bytes = xor(bytes, hash(constant.name.as_bytes()));
-        bytes = xor(
-            bytes,
-            get_type_hash(registry, constant.ty.id, &mut visited_ids),
-        );
-    }
-    if let Some(ref error) = pallet.error {
-        bytes = xor(
-            bytes,
-            get_type_hash(registry, error.ty.id, &mut visited_ids),
-        );
-    }
-    if let Some(ref storage) = pallet.storage {
-        bytes = xor(bytes, hash(storage.prefix.as_bytes()));
-        for entry in storage.entries.iter() {
-            bytes = hash_hashes(
-                bytes,
-                get_storage_entry_hash(registry, entry, &mut visited_ids),
-            );
-        }
+    /// Return details about the outer enums.
+    pub fn outer_enums(&self) -> OuterEnumsMetadata {
+        self.outer_enums
     }
 
-    bytes
-}
-
-/// Obtain the hash representation of a `frame_metadata::RuntimeMetadataV14`.
-pub fn get_metadata_hash(metadata: &RuntimeMetadataV14) -> [u8; 32] {
-    // Collect all pairs of (pallet name, pallet hash).
-    let mut pallets: Vec<(&str, [u8; 32])> = metadata
-        .pallets
-        .iter()
-        .map(|pallet| {
-            let hash = get_pallet_hash(&metadata.types, pallet);
-            (&*pallet.name, hash)
+    /// An iterator over all of the available pallets.
+    pub fn pallets(&self) -> impl ExactSizeIterator<Item = PalletMetadata<'_>> {
+        self.pallets.values().iter().map(|inner| PalletMetadata {
+            inner,
+            types: self.types(),
         })
-        .collect();
-
-    // Sort by pallet name to create a deterministic representation of the underlying metadata.
-    pallets.sort_by_key(|&(name, _hash)| name);
-
-    // Note: pallet name is excluded from hashing.
-    // Each pallet has a hash of 32 bytes, and the vector is extended with
-    // extrinsic hash and metadata ty hash (2 * 32).
-    let mut bytes = Vec::with_capacity(pallets.len() * 32 + 64);
-    for (_, hash) in pallets.iter() {
-        bytes.extend(hash)
     }
 
-    bytes.extend(get_extrinsic_hash(&metadata.types, &metadata.extrinsic));
+    /// Access a pallet given its encoded variant index.
+    pub fn pallet_by_index(&self, variant_index: u8) -> Option<PalletMetadata<'_>> {
+        let inner = self
+            .pallets_by_index
+            .get(&variant_index)
+            .and_then(|i| self.pallets.get_by_index(*i))?;
 
-    let mut visited_ids = HashSet::<u32>::new();
-    bytes.extend(get_type_hash(
-        &metadata.types,
-        metadata.ty.id,
-        &mut visited_ids,
-    ));
-
-    hash(&bytes)
-}
-
-/// Obtain the hash representation of a `frame_metadata::RuntimeMetadataV14`
-/// hashing only the provided pallets.
-///
-/// **Note:** This is similar to `get_metadata_hash`, but performs hashing only of the provided
-/// pallets if they exist. There are cases where the runtime metadata contains a subset of
-/// the pallets from the static metadata. In those cases, the static API can communicate
-/// properly with the subset of pallets from the runtime node.
-pub fn get_metadata_per_pallet_hash<T: AsRef<str>>(
-    metadata: &RuntimeMetadataV14,
-    pallets: &[T],
-) -> [u8; 32] {
-    // Collect all pairs of (pallet name, pallet hash).
-    let mut pallets_hashed: Vec<(&str, [u8; 32])> = metadata
-        .pallets
-        .iter()
-        .filter_map(|pallet| {
-            // Make sure to filter just the pallets we are interested in.
-            let in_pallet = pallets
-                .iter()
-                .any(|pallet_ref| pallet_ref.as_ref() == pallet.name);
-            if in_pallet {
-                let hash = get_pallet_hash(&metadata.types, pallet);
-                Some((&*pallet.name, hash))
-            } else {
-                None
-            }
+        Some(PalletMetadata {
+            inner,
+            types: self.types(),
         })
-        .collect();
-
-    // Sort by pallet name to create a deterministic representation of the underlying metadata.
-    pallets_hashed.sort_by_key(|&(name, _hash)| name);
-
-    // Note: pallet name is excluded from hashing.
-    // Each pallet has a hash of 32 bytes, and the vector is extended with
-    // extrinsic hash and metadata ty hash (2 * 32).
-    let mut bytes = Vec::with_capacity(pallets_hashed.len() * 32);
-    for (_, hash) in pallets_hashed.iter() {
-        bytes.extend(hash)
     }
 
-    hash(&bytes)
+    /// Access a pallet given its name.
+    pub fn pallet_by_name(&self, pallet_name: &str) -> Option<PalletMetadata<'_>> {
+        let inner = self.pallets.get_by_key(pallet_name)?;
+
+        Some(PalletMetadata {
+            inner,
+            types: self.types(),
+        })
+    }
+
+    /// An iterator over all of the runtime APIs.
+    pub fn runtime_api_traits(&self) -> impl ExactSizeIterator<Item = RuntimeApiMetadata<'_>> {
+        self.apis.values().iter().map(|inner| RuntimeApiMetadata {
+            inner,
+            types: self.types(),
+        })
+    }
+
+    /// Access a runtime API trait given its name.
+    pub fn runtime_api_trait_by_name(&'_ self, name: &str) -> Option<RuntimeApiMetadata<'_>> {
+        let inner = self.apis.get_by_key(name)?;
+        Some(RuntimeApiMetadata {
+            inner,
+            types: self.types(),
+        })
+    }
+
+    /// Obtain a unique hash representing this metadata or specific parts of it.
+    pub fn hasher(&self) -> MetadataHasher {
+        MetadataHasher::new(self)
+    }
+
+    /// Filter out any pallets that we don't want to keep, retaining only those that we do.
+    pub fn retain<F, G>(&mut self, pallet_filter: F, api_filter: G)
+    where
+        F: FnMut(&str) -> bool,
+        G: FnMut(&str) -> bool,
+    {
+        utils::retain::retain_metadata(self, pallet_filter, api_filter);
+    }
+
+    /// Get type hash for a type in the registry
+    pub fn type_hash(&self, id: u32) -> Option<[u8; 32]> {
+        self.types.resolve(id)?;
+        Some(crate::utils::validation::get_type_hash(
+            &self.types,
+            id,
+            &mut HashSet::<u32>::new(),
+        ))
+    }
 }
 
-/// An error returned if we attempt to get the hash for a specific call, constant
-/// or storage item that doesn't exist.
-#[derive(Clone, Debug)]
-pub enum NotFound {
-    Pallet,
-    Item,
+/// Metadata for a specific pallet.
+#[derive(Debug, Clone, Copy)]
+pub struct PalletMetadata<'a> {
+    inner: &'a PalletMetadataInner,
+    types: &'a PortableRegistry,
+}
+
+impl<'a> PalletMetadata<'a> {
+    /// The pallet name.
+    pub fn name(&self) -> &'a str {
+        &self.inner.name
+    }
+
+    /// The pallet index.
+    pub fn index(&self) -> u8 {
+        self.inner.index
+    }
+
+    /// The pallet docs.
+    pub fn docs(&self) -> &'a [String] {
+        &self.inner.docs
+    }
+
+    /// Type ID for the pallet's Call type, if it exists.
+    pub fn call_ty_id(&self) -> Option<u32> {
+        self.inner.call_ty
+    }
+
+    /// Type ID for the pallet's Event type, if it exists.
+    pub fn event_ty_id(&self) -> Option<u32> {
+        self.inner.event_ty
+    }
+
+    /// Type ID for the pallet's Error type, if it exists.
+    pub fn error_ty_id(&self) -> Option<u32> {
+        self.inner.error_ty
+    }
+
+    /// Return metadata about the pallet's storage entries.
+    pub fn storage(&self) -> Option<&'a StorageMetadata> {
+        self.inner.storage.as_ref()
+    }
+
+    /// Return all of the event variants, if an event type exists.
+    pub fn event_variants(&self) -> Option<&'a [Variant<PortableForm>]> {
+        VariantIndex::get(self.inner.event_ty, self.types)
+    }
+
+    /// Return an event variant given it's encoded variant index.
+    pub fn event_variant_by_index(&self, variant_index: u8) -> Option<&'a Variant<PortableForm>> {
+        self.inner.event_variant_index.lookup_by_index(
+            variant_index,
+            self.inner.event_ty,
+            self.types,
+        )
+    }
+
+    /// Return all of the call variants, if a call type exists.
+    pub fn call_variants(&self) -> Option<&'a [Variant<PortableForm>]> {
+        VariantIndex::get(self.inner.call_ty, self.types)
+    }
+
+    /// Return a call variant given it's encoded variant index.
+    pub fn call_variant_by_index(&self, variant_index: u8) -> Option<&'a Variant<PortableForm>> {
+        self.inner
+            .call_variant_index
+            .lookup_by_index(variant_index, self.inner.call_ty, self.types)
+    }
+
+    /// Return a call variant given it's name.
+    pub fn call_variant_by_name(&self, call_name: &str) -> Option<&'a Variant<PortableForm>> {
+        self.inner
+            .call_variant_index
+            .lookup_by_name(call_name, self.inner.call_ty, self.types)
+    }
+
+    /// Return all of the error variants, if an error type exists.
+    pub fn error_variants(&self) -> Option<&'a [Variant<PortableForm>]> {
+        VariantIndex::get(self.inner.error_ty, self.types)
+    }
+
+    /// Return an error variant given it's encoded variant index.
+    pub fn error_variant_by_index(&self, variant_index: u8) -> Option<&'a Variant<PortableForm>> {
+        self.inner.error_variant_index.lookup_by_index(
+            variant_index,
+            self.inner.error_ty,
+            self.types,
+        )
+    }
+
+    /// Return constant details given the constant name.
+    pub fn constant_by_name(&self, name: &str) -> Option<&'a ConstantMetadata> {
+        self.inner.constants.get_by_key(name)
+    }
+
+    /// An iterator over the constants in this pallet.
+    pub fn constants(&self) -> impl ExactSizeIterator<Item = &'a ConstantMetadata> {
+        self.inner.constants.values().iter()
+    }
+
+    /// Return a hash for the storage entry, or None if it was not found.
+    pub fn storage_hash(&self, entry_name: &str) -> Option<[u8; 32]> {
+        crate::utils::validation::get_storage_hash(self, entry_name)
+    }
+
+    /// Return a hash for the constant, or None if it was not found.
+    pub fn constant_hash(&self, constant_name: &str) -> Option<[u8; 32]> {
+        crate::utils::validation::get_constant_hash(self, constant_name)
+    }
+
+    /// Return a hash for the call, or None if it was not found.
+    pub fn call_hash(&self, call_name: &str) -> Option<[u8; 32]> {
+        crate::utils::validation::get_call_hash(self, call_name)
+    }
+
+    /// Return a hash for the entire pallet.
+    pub fn hash(&self) -> [u8; 32] {
+        crate::utils::validation::get_pallet_hash(*self)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PalletMetadataInner {
+    /// Pallet name.
+    name: ArcStr,
+    /// Pallet index.
+    index: u8,
+    /// Pallet storage metadata.
+    storage: Option<StorageMetadata>,
+    /// Type ID for the pallet Call enum.
+    call_ty: Option<u32>,
+    /// Call variants by name/u8.
+    call_variant_index: VariantIndex,
+    /// Type ID for the pallet Event enum.
+    event_ty: Option<u32>,
+    /// Event variants by name/u8.
+    event_variant_index: VariantIndex,
+    /// Type ID for the pallet Error enum.
+    error_ty: Option<u32>,
+    /// Error variants by name/u8.
+    error_variant_index: VariantIndex,
+    /// Map from constant name to constant details.
+    constants: OrderedMap<ArcStr, ConstantMetadata>,
+    /// Pallet documentation.
+    docs: Vec<String>,
+}
+
+/// Metadata for the storage entries in a pallet.
+#[derive(Debug, Clone)]
+pub struct StorageMetadata {
+    /// The common prefix used by all storage entries.
+    prefix: String,
+    /// Map from storage entry name to details.
+    entries: OrderedMap<ArcStr, StorageEntryMetadata>,
+}
+
+impl StorageMetadata {
+    /// The common prefix used by all storage entries.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// An iterator over the storage entries.
+    pub fn entries(&self) -> &[StorageEntryMetadata] {
+        self.entries.values()
+    }
+
+    /// Return a specific storage entry given its name.
+    pub fn entry_by_name(&self, name: &str) -> Option<&StorageEntryMetadata> {
+        self.entries.get_by_key(name)
+    }
+}
+
+/// Metadata for a single storage entry.
+#[derive(Debug, Clone)]
+pub struct StorageEntryMetadata {
+    /// Variable name of the storage entry.
+    name: ArcStr,
+    /// An `Option` modifier of that storage entry.
+    modifier: StorageEntryModifier,
+    /// Type of the value stored in the entry.
+    entry_type: StorageEntryType,
+    /// Default value (SCALE encoded).
+    default: Vec<u8>,
+    /// Storage entry documentation.
+    docs: Vec<String>,
+}
+
+impl StorageEntryMetadata {
+    /// Name of this entry.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Is the entry value optional or does it have a default value.
+    pub fn modifier(&self) -> StorageEntryModifier {
+        self.modifier
+    }
+    /// Type of the storage entry.
+    pub fn entry_type(&self) -> &StorageEntryType {
+        &self.entry_type
+    }
+    /// The SCALE encoded default value for this entry.
+    pub fn default_bytes(&self) -> &[u8] {
+        &self.default
+    }
+    /// Storage entry documentation.
+    pub fn docs(&self) -> &[String] {
+        &self.docs
+    }
+}
+
+/// The type of a storage entry.
+#[derive(Debug, Clone)]
+pub enum StorageEntryType {
+    /// Plain storage entry (just the value).
+    Plain(u32),
+    /// A storage map.
+    Map {
+        /// One or more hashers, should be one hasher per key element.
+        hashers: Vec<StorageHasher>,
+        /// The type of the key, can be a tuple with elements for each of the hashers.
+        key_ty: u32,
+        /// The type of the value.
+        value_ty: u32,
+    },
+}
+
+/// Hasher used by storage maps.
+#[derive(Debug, Clone, Copy)]
+pub enum StorageHasher {
+    /// 128-bit Blake2 hash.
+    Blake2_128,
+    /// 256-bit Blake2 hash.
+    Blake2_256,
+    /// Multiple 128-bit Blake2 hashes concatenated.
+    Blake2_128Concat,
+    /// 128-bit XX hash.
+    Twox128,
+    /// 256-bit XX hash.
+    Twox256,
+    /// Multiple 64-bit XX hashes concatenated.
+    Twox64Concat,
+    /// Identity hashing (no hashing).
+    Identity,
+}
+
+/// Is the storage entry optional, or does it have a default value.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum StorageEntryModifier {
+    /// The storage entry returns an `Option<T>`, with `None` if the key is not present.
+    Optional,
+    /// The storage entry returns `T::Default` if the key is not present.
+    Default,
+}
+
+/// Metadata for a single constant.
+#[derive(Debug, Clone)]
+pub struct ConstantMetadata {
+    /// Name of the pallet constant.
+    name: ArcStr,
+    /// Type of the pallet constant.
+    ty: u32,
+    /// Value stored in the constant (SCALE encoded).
+    value: Vec<u8>,
+    /// Constant documentation.
+    docs: Vec<String>,
+}
+
+impl ConstantMetadata {
+    /// Name of the pallet constant.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Type of the pallet constant.
+    pub fn ty(&self) -> u32 {
+        self.ty
+    }
+    /// Value stored in the constant (SCALE encoded).
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+    /// Constant documentation.
+    pub fn docs(&self) -> &[String] {
+        &self.docs
+    }
+}
+
+/// Metadata for the extrinsic type.
+#[derive(Debug, Clone)]
+pub struct ExtrinsicMetadata {
+    /// The type of the address that signs the extrinsic
+    address_ty: u32,
+    /// The type of the outermost Call enum.
+    call_ty: u32,
+    /// The type of the extrinsic's signature.
+    signature_ty: u32,
+    /// The type of the outermost Extra enum.
+    extra_ty: u32,
+    /// Extrinsic version.
+    version: u8,
+    /// The signed extensions in the order they appear in the extrinsic.
+    signed_extensions: Vec<SignedExtensionMetadata>,
+}
+
+impl ExtrinsicMetadata {
+    /// The type of the address that signs the extrinsic
+    pub fn address_ty(&self) -> u32 {
+        self.address_ty
+    }
+
+    /// The type of the outermost Call enum.
+    pub fn call_ty(&self) -> u32 {
+        self.call_ty
+    }
+    /// The type of the extrinsic's signature.
+    pub fn signature_ty(&self) -> u32 {
+        self.signature_ty
+    }
+    /// The type of the outermost Extra enum.
+    pub fn extra_ty(&self) -> u32 {
+        self.extra_ty
+    }
+
+    /// Extrinsic version.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    /// The extra/additional information associated with the extrinsic.
+    pub fn signed_extensions(&self) -> &[SignedExtensionMetadata] {
+        &self.signed_extensions
+    }
+}
+
+/// Metadata for the signed extensions used by extrinsics.
+#[derive(Debug, Clone)]
+pub struct SignedExtensionMetadata {
+    /// The unique signed extension identifier, which may be different from the type name.
+    identifier: String,
+    /// The type of the signed extension, with the data to be included in the extrinsic.
+    extra_ty: u32,
+    /// The type of the additional signed data, with the data to be included in the signed payload
+    additional_ty: u32,
+}
+
+impl SignedExtensionMetadata {
+    /// The unique signed extension identifier, which may be different from the type name.
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+    /// The type of the signed extension, with the data to be included in the extrinsic.
+    pub fn extra_ty(&self) -> u32 {
+        self.extra_ty
+    }
+    /// The type of the additional signed data, with the data to be included in the signed payload
+    pub fn additional_ty(&self) -> u32 {
+        self.additional_ty
+    }
+}
+
+/// Metadata for the outer enums.
+#[derive(Debug, Clone, Copy)]
+pub struct OuterEnumsMetadata {
+    /// The type of the outer call enum.
+    call_enum_ty: u32,
+    /// The type of the outer event enum.
+    event_enum_ty: u32,
+    /// The type of the outer error enum.
+    error_enum_ty: u32,
+}
+
+impl OuterEnumsMetadata {
+    /// The type of the outer call enum.
+    pub fn call_enum_ty(&self) -> u32 {
+        self.call_enum_ty
+    }
+
+    /// The type of the outer event enum.
+    pub fn event_enum_ty(&self) -> u32 {
+        self.event_enum_ty
+    }
+
+    /// The type of the outer error enum.
+    pub fn error_enum_ty(&self) -> u32 {
+        self.error_enum_ty
+    }
+}
+
+/// Metadata for the available runtime APIs.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeApiMetadata<'a> {
+    inner: &'a RuntimeApiMetadataInner,
+    types: &'a PortableRegistry,
+}
+
+impl<'a> RuntimeApiMetadata<'a> {
+    /// Trait name.
+    pub fn name(&self) -> &'a str {
+        &self.inner.name
+    }
+    /// Trait documentation.
+    pub fn docs(&self) -> &[String] {
+        &self.inner.docs
+    }
+    /// An iterator over the trait methods.
+    pub fn methods(&self) -> impl ExactSizeIterator<Item = &'a RuntimeApiMethodMetadata> {
+        self.inner.methods.values().iter()
+    }
+    /// Get a specific trait method given its name.
+    pub fn method_by_name(&self, name: &str) -> Option<&'a RuntimeApiMethodMetadata> {
+        self.inner.methods.get_by_key(name)
+    }
+    /// Return a hash for the constant, or None if it was not found.
+    pub fn method_hash(&self, method_name: &str) -> Option<[u8; 32]> {
+        crate::utils::validation::get_runtime_api_hash(self, method_name)
+    }
+
+    /// Return a hash for the runtime API trait.
+    pub fn hash(&self) -> [u8; 32] {
+        crate::utils::validation::get_runtime_trait_hash(*self)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeApiMetadataInner {
+    /// Trait name.
+    name: ArcStr,
+    /// Trait methods.
+    methods: OrderedMap<ArcStr, RuntimeApiMethodMetadata>,
+    /// Trait documentation.
+    docs: Vec<String>,
+}
+
+/// Metadata for a single runtime API method.
+#[derive(Debug, Clone)]
+pub struct RuntimeApiMethodMetadata {
+    /// Method name.
+    name: ArcStr,
+    /// Method parameters.
+    inputs: Vec<RuntimeApiMethodParamMetadata>,
+    /// Method output type.
+    output_ty: u32,
+    /// Method documentation.
+    docs: Vec<String>,
+}
+
+impl RuntimeApiMethodMetadata {
+    /// Method name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Method documentation.
+    pub fn docs(&self) -> &[String] {
+        &self.docs
+    }
+    /// Method inputs.
+    pub fn inputs(&self) -> impl ExactSizeIterator<Item = &RuntimeApiMethodParamMetadata> {
+        self.inputs.iter()
+    }
+    /// Method return type.
+    pub fn output_ty(&self) -> u32 {
+        self.output_ty
+    }
+}
+
+/// Metadata for a single input parameter to a runtime API method.
+#[derive(Debug, Clone)]
+pub struct RuntimeApiMethodParamMetadata {
+    /// Parameter name.
+    pub name: String,
+    /// Parameter type.
+    pub ty: u32,
+}
+
+// Support decoding metadata from the "wire" format directly into this.
+// Errors may be lost in the case that the metadata content is somehow invalid.
+impl codec::Decode for Metadata {
+    fn decode<I: codec::Input>(input: &mut I) -> Result<Self, codec::Error> {
+        let metadata = frame_metadata::RuntimeMetadataPrefixed::decode(input)?;
+        let metadata = match metadata.1 {
+            frame_metadata::RuntimeMetadata::V14(md) => md.try_into(),
+            frame_metadata::RuntimeMetadata::V15(md) => md.try_into(),
+            _ => return Err("Cannot try_into() to Metadata: unsupported metadata version".into()),
+        };
+
+        metadata.map_err(|_e| "Cannot try_into() to Metadata.".into())
+    }
+}
+
+// Metadata can be encoded, too. It will encode into a format that's compatible with what
+// Subxt requires, and that it can be decoded back from. The actual specifics of the format
+// can change over time.
+impl codec::Encode for Metadata {
+    fn encode_to<T: codec::Output + ?Sized>(&self, dest: &mut T) {
+        let m: frame_metadata::v15::RuntimeMetadataV15 = self.clone().into();
+        let m: frame_metadata::RuntimeMetadataPrefixed = m.into();
+        m.encode_to(dest)
+    }
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
-    use bitvec::{order::Lsb0, vec::BitVec};
-    use frame_metadata::{
-        ExtrinsicMetadata, PalletCallMetadata, PalletConstantMetadata, PalletErrorMetadata,
-        PalletEventMetadata, PalletMetadata, PalletStorageMetadata, RuntimeMetadataV14,
-        StorageEntryMetadata, StorageEntryModifier,
-    };
-    use scale_info::meta_type;
+    use codec::{Decode, Encode};
 
-    // Define recursive types.
-    #[allow(dead_code)]
-    #[derive(scale_info::TypeInfo)]
-    struct A {
-        pub b: Box<B>,
-    }
-    #[allow(dead_code)]
-    #[derive(scale_info::TypeInfo)]
-    struct B {
-        pub a: Box<A>,
+    fn load_metadata() -> Vec<u8> {
+        std::fs::read("../artifacts/polkadot_metadata_full.scale").unwrap()
     }
 
-    // Define TypeDef supported types.
-    #[allow(dead_code)]
-    #[derive(scale_info::TypeInfo)]
-    // TypeDef::Composite with TypeDef::Array with Typedef::Primitive.
-    struct AccountId32([u8; 32]);
-    #[allow(dead_code)]
-    #[derive(scale_info::TypeInfo)]
-    // TypeDef::Variant.
-    enum DigestItem {
-        PreRuntime(
-            // TypeDef::Array with primitive.
-            [::core::primitive::u8; 4usize],
-            // TypeDef::Sequence.
-            ::std::vec::Vec<::core::primitive::u8>,
-        ),
-        Other(::std::vec::Vec<::core::primitive::u8>),
-        // Nested TypeDef::Tuple.
-        RuntimeEnvironmentUpdated(((i8, i16), (u32, u64))),
-        // TypeDef::Compact.
-        Index(#[codec(compact)] ::core::primitive::u8),
-        // TypeDef::BitSequence.
-        BitSeq(BitVec<u8, Lsb0>),
-    }
-    #[allow(dead_code)]
-    #[derive(scale_info::TypeInfo)]
-    // Ensure recursive types and TypeDef variants are captured.
-    struct MetadataTestType {
-        recursive: A,
-        composite: AccountId32,
-        type_def: DigestItem,
-    }
-    #[allow(dead_code)]
-    #[derive(scale_info::TypeInfo)]
-    // Simulate a PalletCallMetadata.
-    enum Call {
-        #[codec(index = 0)]
-        FillBlock { ratio: AccountId32 },
-        #[codec(index = 1)]
-        Remark { remark: DigestItem },
-    }
-
-    fn build_default_extrinsic() -> ExtrinsicMetadata {
-        ExtrinsicMetadata {
-            ty: meta_type::<()>(),
-            version: 0,
-            signed_extensions: vec![],
-        }
-    }
-
-    fn default_pallet() -> PalletMetadata {
-        PalletMetadata {
-            name: "Test",
-            storage: None,
-            calls: None,
-            event: None,
-            constants: vec![],
-            error: None,
-            index: 0,
-        }
-    }
-
-    fn build_default_pallets() -> Vec<PalletMetadata> {
-        vec![
-            PalletMetadata {
-                name: "First",
-                calls: Some(PalletCallMetadata {
-                    ty: meta_type::<MetadataTestType>(),
-                }),
-                ..default_pallet()
-            },
-            PalletMetadata {
-                name: "Second",
-                index: 1,
-                calls: Some(PalletCallMetadata {
-                    ty: meta_type::<(DigestItem, AccountId32, A)>(),
-                }),
-                ..default_pallet()
-            },
-        ]
-    }
-
-    fn pallets_to_metadata(pallets: Vec<PalletMetadata>) -> RuntimeMetadataV14 {
-        RuntimeMetadataV14::new(pallets, build_default_extrinsic(), meta_type::<()>())
-    }
-
+    // We don't expect to lose any information converting back and forth between
+    // our own representation and the latest version emitted from a node that we can
+    // work with.
     #[test]
-    fn different_pallet_index() {
-        let pallets = build_default_pallets();
-        let mut pallets_swap = pallets.clone();
+    fn is_isomorphic_to_v15() {
+        let bytes = load_metadata();
 
-        let metadata = pallets_to_metadata(pallets);
+        // Decode into our metadata struct:
+        let metadata = Metadata::decode(&mut &*bytes).unwrap();
 
-        // Change the order in which pallets are registered.
-        pallets_swap.swap(0, 1);
-        pallets_swap[0].index = 0;
-        pallets_swap[1].index = 1;
-        let metadata_swap = pallets_to_metadata(pallets_swap);
+        // Convert into v15 metadata:
+        let v15: frame_metadata::v15::RuntimeMetadataV15 = metadata.into();
+        let prefixed = frame_metadata::RuntimeMetadataPrefixed::from(v15);
 
-        let hash = get_metadata_hash(&metadata);
-        let hash_swap = get_metadata_hash(&metadata_swap);
+        // Re-encode that:
+        let new_bytes = prefixed.encode();
 
-        // Changing pallet order must still result in a deterministic unique hash.
-        assert_eq!(hash, hash_swap);
-    }
-
-    #[test]
-    fn recursive_type() {
-        let mut pallet = default_pallet();
-        pallet.calls = Some(PalletCallMetadata {
-            ty: meta_type::<A>(),
-        });
-        let metadata = pallets_to_metadata(vec![pallet]);
-
-        // Check hashing algorithm finishes on a recursive type.
-        get_metadata_hash(&metadata);
-    }
-
-    #[test]
-    /// Ensure correctness of hashing when parsing the `metadata.types`.
-    ///
-    /// Having a recursive structure `A: { B }` and `B: { A }` registered in different order
-    /// `types: { { id: 0, A }, { id: 1, B } }` and `types: { { id: 0, B }, { id: 1, A } }`
-    /// must produce the same deterministic hashing value.
-    fn recursive_types_different_order() {
-        let mut pallets = build_default_pallets();
-        pallets[0].calls = Some(PalletCallMetadata {
-            ty: meta_type::<A>(),
-        });
-        pallets[1].calls = Some(PalletCallMetadata {
-            ty: meta_type::<B>(),
-        });
-        pallets[1].index = 1;
-        let mut pallets_swap = pallets.clone();
-        let metadata = pallets_to_metadata(pallets);
-
-        pallets_swap.swap(0, 1);
-        pallets_swap[0].index = 0;
-        pallets_swap[1].index = 1;
-        let metadata_swap = pallets_to_metadata(pallets_swap);
-
-        let hash = get_metadata_hash(&metadata);
-        let hash_swap = get_metadata_hash(&metadata_swap);
-
-        // Changing pallet order must still result in a deterministic unique hash.
-        assert_eq!(hash, hash_swap);
-    }
-
-    #[test]
-    fn pallet_hash_correctness() {
-        let compare_pallets_hash = |lhs: &PalletMetadata, rhs: &PalletMetadata| {
-            let metadata = pallets_to_metadata(vec![lhs.clone()]);
-            let hash = get_metadata_hash(&metadata);
-
-            let metadata = pallets_to_metadata(vec![rhs.clone()]);
-            let new_hash = get_metadata_hash(&metadata);
-
-            assert_ne!(hash, new_hash);
-        };
-
-        // Build metadata progressively from an empty pallet to a fully populated pallet.
-        let mut pallet = default_pallet();
-        let pallet_lhs = pallet.clone();
-        pallet.storage = Some(PalletStorageMetadata {
-            prefix: "Storage",
-            entries: vec![StorageEntryMetadata {
-                name: "BlockWeight",
-                modifier: StorageEntryModifier::Default,
-                ty: StorageEntryType::Plain(meta_type::<u8>()),
-                default: vec![],
-                docs: vec![],
-            }],
-        });
-        compare_pallets_hash(&pallet_lhs, &pallet);
-
-        let pallet_lhs = pallet.clone();
-        // Calls are similar to:
-        //
-        // ```
-        // pub enum Call {
-        //     call_name_01 { arg01: type },
-        //     call_name_02 { arg01: type, arg02: type }
-        // }
-        // ```
-        pallet.calls = Some(PalletCallMetadata {
-            ty: meta_type::<Call>(),
-        });
-        compare_pallets_hash(&pallet_lhs, &pallet);
-
-        let pallet_lhs = pallet.clone();
-        // Events are similar to Calls.
-        pallet.event = Some(PalletEventMetadata {
-            ty: meta_type::<Call>(),
-        });
-        compare_pallets_hash(&pallet_lhs, &pallet);
-
-        let pallet_lhs = pallet.clone();
-        pallet.constants = vec![PalletConstantMetadata {
-            name: "BlockHashCount",
-            ty: meta_type::<u64>(),
-            value: vec![96u8, 0, 0, 0],
-            docs: vec![],
-        }];
-        compare_pallets_hash(&pallet_lhs, &pallet);
-
-        let pallet_lhs = pallet.clone();
-        pallet.error = Some(PalletErrorMetadata {
-            ty: meta_type::<MetadataTestType>(),
-        });
-        compare_pallets_hash(&pallet_lhs, &pallet);
-    }
-
-    #[test]
-    fn metadata_per_pallet_hash_correctness() {
-        let pallets = build_default_pallets();
-
-        // Build metadata with just the first pallet.
-        let metadata_one = pallets_to_metadata(vec![pallets[0].clone()]);
-        // Build metadata with both pallets.
-        let metadata_both = pallets_to_metadata(pallets);
-
-        // Hashing will ignore any non-existant pallet and return the same result.
-        let hash = get_metadata_per_pallet_hash(&metadata_one, &["First", "Second"]);
-        let hash_rhs = get_metadata_per_pallet_hash(&metadata_one, &["First"]);
-        assert_eq!(hash, hash_rhs, "hashing should ignore non-existant pallets");
-
-        // Hashing one pallet from metadata with 2 pallets inserted will ignore the second pallet.
-        let hash_second = get_metadata_per_pallet_hash(&metadata_both, &["First"]);
-        assert_eq!(
-            hash_second, hash,
-            "hashing one pallet should ignore the others"
-        );
-
-        // Check hashing with all pallets.
-        let hash_second = get_metadata_per_pallet_hash(&metadata_both, &["First", "Second"]);
-        assert_ne!(
-            hash_second, hash,
-            "hashing both pallets should produce a different result from hashing just one pallet"
-        );
-    }
-
-    #[test]
-    fn field_semantic_changes() {
-        // Get a hash representation of the provided meta type,
-        // inserted in the context of pallet metadata call.
-        let to_hash = |meta_ty| {
-            let pallet = PalletMetadata {
-                calls: Some(PalletCallMetadata { ty: meta_ty }),
-                ..default_pallet()
-            };
-            let metadata = pallets_to_metadata(vec![pallet]);
-            get_metadata_hash(&metadata)
-        };
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        enum EnumFieldNotNamedA {
-            First(u8),
-        }
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        enum EnumFieldNotNamedB {
-            First(u8),
-        }
-        // Semantic changes apply only to field names.
-        // This is considered to be a good tradeoff in hashing performance, as refactoring
-        // a structure / enum 's name is less likely to cause a breaking change.
-        // Even if the enums have different names, 'EnumFieldNotNamedA' and 'EnumFieldNotNamedB',
-        // they are equal in meaning (i.e, both contain `First(u8)`).
-        assert_eq!(
-            to_hash(meta_type::<EnumFieldNotNamedA>()),
-            to_hash(meta_type::<EnumFieldNotNamedB>())
-        );
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        struct StructFieldNotNamedA([u8; 32]);
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        struct StructFieldNotNamedSecondB([u8; 32]);
-        // Similarly to enums, semantic changes apply only inside the structure fields.
-        assert_eq!(
-            to_hash(meta_type::<StructFieldNotNamedA>()),
-            to_hash(meta_type::<StructFieldNotNamedSecondB>())
-        );
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        enum EnumFieldNotNamed {
-            First(u8),
-        }
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        enum EnumFieldNotNamedSecond {
-            Second(u8),
-        }
-        // The enums are binary compatible, they contain a different semantic meaning:
-        // `First(u8)` and `Second(u8)`.
-        assert_ne!(
-            to_hash(meta_type::<EnumFieldNotNamed>()),
-            to_hash(meta_type::<EnumFieldNotNamedSecond>())
-        );
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        enum EnumFieldNamed {
-            First { a: u8 },
-        }
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        enum EnumFieldNamedSecond {
-            First { b: u8 },
-        }
-        // Named fields contain a different semantic meaning ('a' and 'b').
-        assert_ne!(
-            to_hash(meta_type::<EnumFieldNamed>()),
-            to_hash(meta_type::<EnumFieldNamedSecond>())
-        );
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        struct StructFieldNamed {
-            a: u32,
-        }
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        struct StructFieldNamedSecond {
-            b: u32,
-        }
-        // Similar to enums, struct fields contain a different semantic meaning ('a' and 'b').
-        assert_ne!(
-            to_hash(meta_type::<StructFieldNamed>()),
-            to_hash(meta_type::<StructFieldNamedSecond>())
-        );
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        enum EnumField {
-            First,
-            // Field is unnamed, but has type name `u8`.
-            Second(u8),
-            // File is named and has type name `u8`.
-            Third { named: u8 },
-        }
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        enum EnumFieldSwap {
-            Second(u8),
-            First,
-            Third { named: u8 },
-        }
-        // Swapping the registration order should also be taken into account.
-        assert_ne!(
-            to_hash(meta_type::<EnumField>()),
-            to_hash(meta_type::<EnumFieldSwap>())
-        );
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        struct StructField {
-            a: u32,
-            b: u32,
-        }
-
-        #[allow(dead_code)]
-        #[derive(scale_info::TypeInfo)]
-        struct StructFieldSwap {
-            b: u32,
-            a: u32,
-        }
-        assert_ne!(
-            to_hash(meta_type::<StructField>()),
-            to_hash(meta_type::<StructFieldSwap>())
-        );
+        // The bytes should be identical:
+        assert_eq!(bytes, new_bytes);
     }
 }

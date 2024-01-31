@@ -1,6 +1,6 @@
 [package]
 name = "subxt-metadata"
-version = "0.28.0"
+version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,15 +14,17 @@ homepage.workspace = true
 description = "Command line utilities for checking metadata compatibility between nodes."
 
 [dependencies]
-codec = { package = "parity-scale-codec", version = "3.0.0", default-features = false, features = ["derive", "full"] }
-frame-metadata = "15.0.0"
-scale-info = "2.5.0"
-sp-core-hashing = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.42" }
+codec = { package = "parity-scale-codec", workspace = true, features = ["derive"] }
+frame-metadata = { workspace = true }
+scale-info = { workspace = true }
+sp-core-hashing = { workspace = true, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43" }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-bitvec = { version = "1.0.0", default-features = false, features = ["alloc"] }
-criterion = "0.4"
-scale-info = { version = "2.5.0", features = ["bit-vec"] }
+bitvec = { workspace = true, features = ["alloc"] }
+criterion = { workspace = true }
+scale-info = { workspace = true, features = ["bit-vec"] }
+assert_matches = { workspace = true }
 
 [lib]
 # Without this, libtest cli opts interfere with criteron benches:

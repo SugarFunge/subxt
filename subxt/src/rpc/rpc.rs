@@ -16,7 +16,7 @@
 //! # async fn main() {
 //! use subxt::{ PolkadotConfig, OnlineClient, storage::StorageKey };
 //!
-//! #[subxt::subxt(runtime_metadata_path = "../artifacts/polkadot_metadata.scale")]
+//! #[subxt::subxt(runtime_metadata_path = "../artifacts/polkadot_metadata_full.scale")]
 //! pub mod polkadot {}
 //!
 //! let api = OnlineClient::<PolkadotConfig>::new().await.unwrap();
@@ -31,16 +31,17 @@
 //! # }
 //! ```
 
+use std::sync::Arc;
+
+use codec::{Decode, Encode};
+
+use crate::{error::Error, utils::PhantomDataSendSync, Config, Metadata};
+
 use super::{
     rpc_params,
     types::{self, ChainHeadEvent, FollowEvent},
     RpcClient, RpcClientT, Subscription,
 };
-use crate::{error::Error, utils::PhantomDataSendSync, Config, Metadata};
-use codec::{Decode, Encode};
-use frame_metadata::RuntimeMetadataPrefixed;
-use serde::Serialize;
-use std::sync::Arc;
 
 /// Client for substrate rpc interfaces
 pub struct Rpc<T: Config> {
@@ -140,34 +141,14 @@ impl<T: Config> Rpc<T> {
         genesis_hash.ok_or_else(|| "Genesis hash not found".into())
     }
 
-    /// Fetch the metadata
-    pub async fn metadata(&self, at: Option<T::Hash>) -> Result<Metadata, Error> {
+    /// Fetch the metadata via the legacy `state_getMetadata` RPC method.
+    pub async fn metadata_legacy(&self, at: Option<T::Hash>) -> Result<Metadata, Error> {
         let bytes: types::Bytes = self
             .client
             .request("state_getMetadata", rpc_params![at])
             .await?;
-        let meta: RuntimeMetadataPrefixed = Decode::decode(&mut &bytes[..])?;
-        let metadata: Metadata = meta.try_into()?;
+        let metadata = Metadata::decode(&mut &bytes[..])?;
         Ok(metadata)
-    }
-
-    /// Execute a runtime API call.
-    pub async fn call(
-        &self,
-        function: String,
-        call_parameters: Option<&[u8]>,
-        at: Option<T::Hash>,
-    ) -> Result<types::Bytes, Error> {
-        let call_parameters = call_parameters.unwrap_or_default();
-
-        let bytes: types::Bytes = self
-            .client
-            .request(
-                "state_call",
-                rpc_params![function, to_hex(call_parameters), at],
-            )
-            .await?;
-        Ok(bytes)
     }
 
     /// Fetch system properties
@@ -195,16 +176,6 @@ impl<T: Config> Rpc<T> {
     /// Fetch system version
     pub async fn system_version(&self) -> Result<String, Error> {
         self.client.request("system_version", rpc_params![]).await
-    }
-
-    /// Fetch the current nonce for the given account ID.
-    pub async fn system_account_next_index<AccountId: Serialize>(
-        &self,
-        account: &AccountId,
-    ) -> Result<T::Index, Error> {
-        self.client
-            .request("system_accountNextIndex", rpc_params![account])
-            .await
     }
 
     /// Get a header
@@ -363,15 +334,14 @@ impl<T: Config> Rpc<T> {
         Ok(xt_hash)
     }
 
-    /// Execute a runtime API call.
-    pub async fn state_call(
+    /// Execute a runtime API call via `state_call` RPC method.
+    pub async fn state_call_raw(
         &self,
         function: &str,
         call_parameters: Option<&[u8]>,
         at: Option<T::Hash>,
     ) -> Result<types::Bytes, Error> {
         let call_parameters = call_parameters.unwrap_or_default();
-
         let bytes: types::Bytes = self
             .client
             .request(
@@ -380,6 +350,56 @@ impl<T: Config> Rpc<T> {
             )
             .await?;
         Ok(bytes)
+    }
+
+    /// Execute a runtime API call and decode the result.
+    pub async fn state_call<Res: Decode>(
+        &self,
+        function: &str,
+        call_parameters: Option<&[u8]>,
+        at: Option<T::Hash>,
+    ) -> Result<Res, Error> {
+        let bytes = self.state_call_raw(function, call_parameters, at).await?;
+        let cursor = &mut &bytes[..];
+        let res: Res = Decode::decode(cursor)?;
+        Ok(res)
+    }
+
+    /// Provide a list of the supported metadata versions of the node.
+    pub async fn metadata_versions(&self) -> Result<Vec<u32>, Error> {
+        let versions = self
+            .state_call("Metadata_metadata_versions", None, None)
+            .await?;
+
+        Ok(versions)
+    }
+
+    /// Execute runtime API call and return the specified runtime metadata version.
+    pub async fn metadata_at_version(&self, version: u32) -> Result<Metadata, Error> {
+        let param = version.encode();
+        let opaque: Option<frame_metadata::OpaqueMetadata> = self
+            .state_call("Metadata_metadata_at_version", Some(&param), None)
+            .await?;
+
+        let bytes = opaque.ok_or(Error::Other("Metadata version not found".into()))?;
+
+        let metadata: Metadata = Decode::decode(&mut &bytes.0[..])?;
+        Ok(metadata)
+    }
+
+    /// Execute a runtime API call into `Metadata_metadata` method
+    /// to fetch the latest available metadata.
+    ///
+    /// # Note
+    ///
+    /// This returns the same output as [`Self::metadata`], but calls directly
+    /// into the runtime.
+    pub async fn metadata(&self) -> Result<Metadata, Error> {
+        let bytes: frame_metadata::OpaqueMetadata =
+            self.state_call("Metadata_metadata", None, None).await?;
+
+        let metadata: Metadata = Decode::decode(&mut &bytes.0[..])?;
+        Ok(metadata)
     }
 
     /// Create and submit an extrinsic and return a subscription to the events triggered.

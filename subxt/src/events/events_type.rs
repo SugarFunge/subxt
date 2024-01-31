@@ -7,19 +7,20 @@
 use super::{Phase, StaticEvent};
 use crate::{
     client::OnlineClientT,
-    error::Error,
+    error::{Error, MetadataError},
     events::events_client::get_event_bytes,
-    metadata::{DecodeWithMetadata, EventMetadata},
+    metadata::types::PalletMetadata,
     Config, Metadata,
 };
 use codec::{Compact, Decode};
 use derivative::Derivative;
+use scale_decode::DecodeAsType;
 use std::sync::Arc;
 
 /// A collection of events obtained from a block, bundled with the necessary
 /// information needed to decode and iterate over them.
 #[derive(Derivative)]
-#[derivative(Debug(bound = ""), Clone(bound = ""))]
+#[derivative(Clone(bound = ""))]
 pub struct Events<T: Config> {
     metadata: Metadata,
     block_hash: T::Hash,
@@ -29,6 +30,18 @@ pub struct Events<T: Config> {
     event_bytes: Arc<[u8]>,
     start_idx: usize,
     num_events: u32,
+}
+
+// Ignore the Metadata when debug-logging events; it's big and distracting.
+impl<T: Config> std::fmt::Debug for Events<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Events")
+            .field("block_hash", &self.block_hash)
+            .field("event_bytes", &self.event_bytes)
+            .field("start_idx", &self.start_idx)
+            .field("num_events", &self.num_events)
+            .finish()
+    }
 }
 
 impl<T: Config> Events<T> {
@@ -76,7 +89,7 @@ impl<T: Config> Events<T> {
     ///     .await?
     ///     .expect("didn't pass a block number; qed");
     ///  // Fetch the metadata of the given block.
-    ///  let metadata = client.rpc().metadata(Some(block_hash)).await?;
+    ///  let metadata = client.rpc().metadata_legacy(Some(block_hash)).await?;
     ///  // Fetch the events from the client.
     ///  let events = Events::new_from_client(metadata, block_hash, client);
     /// # Ok(())
@@ -121,7 +134,7 @@ impl<T: Config> Events<T> {
     // use of it with our `FilterEvents` stuff.
     pub fn iter(
         &self,
-    ) -> impl Iterator<Item = Result<EventDetails, Error>> + Send + Sync + 'static {
+    ) -> impl Iterator<Item = Result<EventDetails<T>, Error>> + Send + Sync + 'static {
         // The event bytes ignoring the compact encoded length on the front:
         let event_bytes = self.event_bytes.clone();
         let metadata = self.metadata.clone();
@@ -133,12 +146,7 @@ impl<T: Config> Events<T> {
             if event_bytes.len() <= pos || num_events == index {
                 None
             } else {
-                match EventDetails::decode_from::<T>(
-                    metadata.clone(),
-                    event_bytes.clone(),
-                    pos,
-                    index,
-                ) {
+                match EventDetails::decode_from(metadata.clone(), event_bytes.clone(), pos, index) {
                     Ok(event_details) => {
                         // Skip over decoded bytes in next iteration:
                         pos += event_details.bytes().len();
@@ -189,7 +197,7 @@ impl<T: Config> Events<T> {
 
 /// The event details.
 #[derive(Debug, Clone)]
-pub struct EventDetails {
+pub struct EventDetails<T: Config> {
     phase: Phase,
     /// The index of the event in the list of events in a given block.
     index: u32,
@@ -205,16 +213,17 @@ pub struct EventDetails {
     // end of everything (fields + topics)
     end_idx: usize,
     metadata: Metadata,
+    topics: Vec<T::Hash>,
 }
 
-impl EventDetails {
+impl<T: Config> EventDetails<T> {
     // Attempt to dynamically decode a single event from our events input.
-    fn decode_from<T: Config>(
+    fn decode_from(
         metadata: Metadata,
         all_bytes: Arc<[u8]>,
         start_idx: usize,
         index: u32,
-    ) -> Result<EventDetails, Error> {
+    ) -> Result<EventDetails<T>, Error> {
         let input = &mut &all_bytes[start_idx..];
 
         let phase = Phase::decode(input)?;
@@ -227,20 +236,23 @@ impl EventDetails {
         let event_fields_start_idx = all_bytes.len() - input.len();
 
         // Get metadata for the event:
-        let event_metadata = metadata.event(pallet_index, variant_index)?;
+        let event_pallet = metadata.pallet_by_index_err(pallet_index)?;
+        let event_variant = event_pallet
+            .event_variant_by_index(variant_index)
+            .ok_or(MetadataError::VariantIndexNotFound(variant_index))?;
         tracing::debug!(
             "Decoding Event '{}::{}'",
-            event_metadata.pallet(),
-            event_metadata.event()
+            event_pallet.name(),
+            &event_variant.name
         );
 
         // Skip over the bytes belonging to this event.
-        for field_metadata in event_metadata.fields() {
+        for field_metadata in &event_variant.fields {
             // Skip over the bytes for this field:
             scale_decode::visitor::decode_with_visitor(
                 input,
                 field_metadata.ty.id,
-                &metadata.runtime_metadata().types,
+                metadata.types(),
                 scale_decode::visitor::IgnoreVisitor,
             )
             .map_err(scale_decode::Error::from)?;
@@ -249,9 +261,8 @@ impl EventDetails {
         // the end of the field bytes.
         let event_fields_end_idx = all_bytes.len() - input.len();
 
-        // topics come after the event data in EventRecord. They aren't used for
-        // anything at the moment, so just decode and throw them away.
-        let _topics = Vec::<T::Hash>::decode(input)?;
+        // topics come after the event data in EventRecord.
+        let topics = Vec::<T::Hash>::decode(input)?;
 
         // what bytes did we skip over in total, including topics.
         let end_idx = all_bytes.len() - input.len();
@@ -266,6 +277,7 @@ impl EventDetails {
             end_idx,
             all_bytes,
             metadata,
+            topics,
         })
     }
 
@@ -295,19 +307,25 @@ impl EventDetails {
 
     /// The name of the pallet from whence the Event originated.
     pub fn pallet_name(&self) -> &str {
-        self.event_metadata().pallet()
+        self.event_metadata().pallet.name()
     }
 
     /// The name of the event (ie the name of the variant that it corresponds to).
     pub fn variant_name(&self) -> &str {
-        self.event_metadata().event()
+        &self.event_metadata().variant.name
     }
 
-    /// Fetch the metadata for this event.
-    pub fn event_metadata(&self) -> &EventMetadata {
-        self.metadata
-            .event(self.pallet_index(), self.variant_index())
-            .expect("this must exist in order to have produced the EventDetails")
+    /// Fetch details from the metadata for this event.
+    pub fn event_metadata(&self) -> EventMetadataDetails {
+        let pallet = self
+            .metadata
+            .pallet_by_index(self.pallet_index())
+            .expect("event pallet to be found; we did this already during decoding");
+        let variant = pallet
+            .event_variant_by_index(self.variant_index())
+            .expect("event variant to be found; we did this already during decoding");
+
+        EventMetadataDetails { pallet, variant }
     }
 
     /// Return _all_ of the bytes representing this event, which include, in order:
@@ -325,102 +343,72 @@ impl EventDetails {
     }
 
     /// Decode and provide the event fields back in the form of a [`scale_value::Composite`]
-    /// type which represents the named or unnamed fields that were
-    /// present in the event.
+    /// type which represents the named or unnamed fields that were present in the event.
     pub fn field_values(
         &self,
     ) -> Result<scale_value::Composite<scale_value::scale::TypeId>, Error> {
         let bytes = &mut self.field_bytes();
         let event_metadata = self.event_metadata();
 
+        let mut fields = event_metadata
+            .variant
+            .fields
+            .iter()
+            .map(|f| scale_decode::Field::new(f.ty.id, f.name.as_deref()));
+
         use scale_decode::DecodeAsFields;
         let decoded = <scale_value::Composite<scale_value::scale::TypeId>>::decode_as_fields(
             bytes,
-            event_metadata.fields(),
-            &self.metadata.runtime_metadata().types,
+            &mut fields,
+            self.metadata.types(),
         )?;
 
         Ok(decoded)
     }
 
-    /// Attempt to statically decode these [`EventDetails`] into a type representing the event
-    /// fields. This leans directly on [`codec::Decode`]. You can also attempt to decode the entirety
-    /// of the event using [`EventDetails::as_root_event()`], which is more lenient because it's able
-    /// to lean on [`scale_decode::DecodeAsType`].
+    /// Attempt to decode these [`EventDetails`] into a type representing the event fields.
+    /// Such types are exposed in the codegen as `pallet_name::events::EventName` types.
     pub fn as_event<E: StaticEvent>(&self) -> Result<Option<E>, Error> {
         let ev_metadata = self.event_metadata();
-        if ev_metadata.pallet() == E::PALLET && ev_metadata.event() == E::EVENT {
-            let decoded = E::decode_as_fields(
-                &mut self.field_bytes(),
-                ev_metadata.fields(),
-                self.metadata.types(),
-            )?;
+        if ev_metadata.pallet.name() == E::PALLET && ev_metadata.variant.name == E::EVENT {
+            let mut fields = ev_metadata
+                .variant
+                .fields
+                .iter()
+                .map(|f| scale_decode::Field::new(f.ty.id, f.name.as_deref()));
+            let decoded =
+                E::decode_as_fields(&mut self.field_bytes(), &mut fields, self.metadata.types())?;
             Ok(Some(decoded))
         } else {
             Ok(None)
         }
     }
 
-    /// Attempt to decode these [`EventDetails`] into a pallet event type (which includes
-    /// the pallet enum variants as well as the event fields). These events can be found in
-    /// the static codegen under a path like `pallet_name::Event`.
-    pub fn as_pallet_event<E: DecodeWithMetadata>(&self) -> Result<E, Error> {
-        let pallet = self.metadata.pallet(self.pallet_name())?;
-        let event_ty = pallet.event_ty_id().ok_or_else(|| {
-            Error::Metadata(crate::metadata::MetadataError::EventNotFound(
-                pallet.index(),
-                self.variant_index(),
-            ))
-        })?;
-
-        // Ignore the root enum index, so start 1 byte after that:
-        let start_idx = self.event_start_idx + 1;
-
-        let decoded = E::decode_with_metadata(
-            &mut &self.all_bytes[start_idx..self.event_fields_end_idx],
-            event_ty,
-            &self.metadata,
-        )?;
-        Ok(decoded)
-    }
-
     /// Attempt to decode these [`EventDetails`] into a root event type (which includes
     /// the pallet and event enum variants as well as the event fields). A compatible
     /// type for this is exposed via static codegen as a root level `Event` type.
-    pub fn as_root_event<E: RootEvent>(&self) -> Result<E, Error> {
-        let pallet_bytes = &self.all_bytes[self.event_start_idx + 1..self.event_fields_end_idx];
-        let pallet = self.metadata.pallet(self.pallet_name())?;
-        let pallet_event_ty = pallet.event_ty_id().ok_or_else(|| {
-            Error::Metadata(crate::metadata::MetadataError::EventNotFound(
-                pallet.index(),
-                self.variant_index(),
-            ))
-        })?;
+    pub fn as_root_event<E: DecodeAsType>(&self) -> Result<E, Error> {
+        let bytes = &self.all_bytes[self.event_start_idx..self.event_fields_end_idx];
 
-        E::root_event(
-            pallet_bytes,
-            self.pallet_name(),
-            pallet_event_ty,
-            &self.metadata,
-        )
+        let decoded = E::decode_as_type(
+            &mut &bytes[..],
+            self.metadata.outer_enums().event_enum_ty(),
+            self.metadata.types(),
+        )?;
+
+        Ok(decoded)
+    }
+
+    /// Return the topics associated with this event.
+    pub fn topics(&self) -> &[T::Hash] {
+        &self.topics
     }
 }
 
-/// This trait is implemented on the statically generated root event type, so that we're able
-/// to decode it properly via a pallet event that impls `DecodeAsMetadata`. This is necessary
-/// becasue the "root event" type is generated using pallet info but doesn't actually exist in the
-/// metadata types, so we have no easy way to decode things into it via type information and need a
-/// little help via codegen.
-#[doc(hidden)]
-pub trait RootEvent: Sized {
-    /// Given details of the pallet event we want to decode, and the name of the pallet, try to hand
-    /// back a "root event".
-    fn root_event(
-        pallet_bytes: &[u8],
-        pallet_name: &str,
-        pallet_event_ty: u32,
-        metadata: &Metadata,
-    ) -> Result<Self, Error>;
+/// Details for the given event plucked from the metadata.
+pub struct EventMetadataDetails<'a> {
+    pub pallet: PalletMetadata<'a>,
+    pub variant: &'a scale_info::Variant<scale_info::form::PortableForm>,
 }
 
 /// Event related test utilities used outside this module.
@@ -430,11 +418,13 @@ pub(crate) mod test_utils {
     use crate::{Config, SubstrateConfig};
     use codec::Encode;
     use frame_metadata::{
-        v14::{ExtrinsicMetadata, PalletEventMetadata, PalletMetadata, RuntimeMetadataV14},
+        v15::{
+            CustomMetadata, ExtrinsicMetadata, OuterEnums, PalletEventMetadata, PalletMetadata,
+            RuntimeMetadataV15,
+        },
         RuntimeMetadataPrefixed,
     };
     use scale_info::{meta_type, TypeInfo};
-    use std::convert::TryFrom;
 
     /// An "outer" events enum containing exactly one event.
     #[derive(
@@ -452,25 +442,6 @@ pub(crate) mod test_utils {
         Test(Ev),
     }
 
-    // We need this in order to be able to decode into a root event type:
-    impl<Ev: DecodeWithMetadata> RootEvent for AllEvents<Ev> {
-        fn root_event(
-            mut bytes: &[u8],
-            pallet_name: &str,
-            pallet_event_ty: u32,
-            metadata: &Metadata,
-        ) -> Result<Self, Error> {
-            if pallet_name == "Test" {
-                return Ok(AllEvents::Test(Ev::decode_with_metadata(
-                    &mut bytes,
-                    pallet_event_ty,
-                    metadata,
-                )?));
-            }
-            panic!("Asked for pallet name '{pallet_name}', which isn't in our test AllEvents type")
-        }
-    }
-
     /// This encodes to the same format an event is expected to encode to
     /// in node System.Events storage.
     #[derive(Encode)]
@@ -480,19 +451,50 @@ pub(crate) mod test_utils {
         topics: Vec<<SubstrateConfig as Config>::Hash>,
     }
 
+    impl<E: Encode> EventRecord<E> {
+        /// Create a new event record with the given phase, event, and topics.
+        pub fn new(phase: Phase, event: E, topics: Vec<<SubstrateConfig as Config>::Hash>) -> Self {
+            Self {
+                phase,
+                event: AllEvents::Test(event),
+                topics,
+            }
+        }
+    }
+
     /// Build an EventRecord, which encoded events in the format expected
     /// to be handed back from storage queries to System.Events.
     pub fn event_record<E: Encode>(phase: Phase, event: E) -> EventRecord<E> {
-        EventRecord {
-            phase,
-            event: AllEvents::Test(event),
-            topics: vec![],
-        }
+        EventRecord::new(phase, event, vec![])
     }
 
     /// Build fake metadata consisting of a single pallet that knows
     /// about the event type provided.
     pub fn metadata<E: TypeInfo + 'static>() -> Metadata {
+        // Extrinsic needs to contain at least the generic type parameter "Call"
+        // for the metadata to be valid.
+        // The "Call" type from the metadata is used to decode extrinsics.
+        // In reality, the extrinsic type has "Call", "Address", "Extra", "Signature" generic types.
+        #[allow(unused)]
+        #[derive(TypeInfo)]
+        struct ExtrinsicType<Call> {
+            call: Call,
+        }
+        // Because this type is used to decode extrinsics, we expect this to be a TypeDefVariant.
+        // Each pallet must contain one single variant.
+        #[allow(unused)]
+        #[derive(TypeInfo)]
+        enum RuntimeCall {
+            PalletName(Pallet),
+        }
+        // The calls of the pallet.
+        #[allow(unused)]
+        #[derive(TypeInfo)]
+        enum Pallet {
+            #[allow(unused)]
+            SomeCall,
+        }
+
         let pallets = vec![PalletMetadata {
             name: "Test",
             storage: None,
@@ -503,18 +505,35 @@ pub(crate) mod test_utils {
             constants: vec![],
             error: None,
             index: 0,
+            docs: vec![],
         }];
 
         let extrinsic = ExtrinsicMetadata {
-            ty: meta_type::<()>(),
             version: 0,
             signed_extensions: vec![],
+            address_ty: meta_type::<()>(),
+            call_ty: meta_type::<RuntimeCall>(),
+            signature_ty: meta_type::<()>(),
+            extra_ty: meta_type::<()>(),
         };
 
-        let v14 = RuntimeMetadataV14::new(pallets, extrinsic, meta_type::<()>());
-        let runtime_metadata: RuntimeMetadataPrefixed = v14.into();
+        let meta = RuntimeMetadataV15::new(
+            pallets,
+            extrinsic,
+            meta_type::<()>(),
+            vec![],
+            OuterEnums {
+                call_enum_ty: meta_type::<()>(),
+                event_enum_ty: meta_type::<AllEvents<E>>(),
+                error_enum_ty: meta_type::<()>(),
+            },
+            CustomMetadata {
+                map: Default::default(),
+            },
+        );
+        let runtime_metadata: RuntimeMetadataPrefixed = meta.into();
 
-        Metadata::try_from(runtime_metadata).unwrap()
+        Metadata::new(runtime_metadata.try_into().unwrap())
     }
 
     /// Build an `Events` object for test purposes, based on the details provided,
@@ -552,10 +571,12 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::{
-        test_utils::{event_record, events, events_raw, AllEvents},
+        test_utils::{event_record, events, events_raw, AllEvents, EventRecord},
         *,
     };
+    use crate::SubstrateConfig;
     use codec::Encode;
+    use primitive_types::H256;
     use scale_info::TypeInfo;
     use scale_value::Value;
 
@@ -584,10 +605,10 @@ mod tests {
         // Just for convenience, pass in the metadata type constructed
         // by the `metadata` function above to simplify caller code.
         metadata: &Metadata,
-        actual: EventDetails,
+        actual: EventDetails<SubstrateConfig>,
         expected: TestRawEventDetails,
     ) {
-        let types = &metadata.runtime_metadata().types;
+        let types = &metadata.types();
 
         // Make sure that the bytes handed back line up with the fields handed back;
         // encode the fields back into bytes and they should be equal.
@@ -648,39 +669,6 @@ mod tests {
 
         // It should equal the event we put in:
         assert_eq!(decoded_event, AllEvents::Test(event));
-    }
-
-    #[test]
-    fn statically_decode_single_pallet_event() {
-        #[derive(Clone, Debug, PartialEq, Decode, Encode, TypeInfo, scale_decode::DecodeAsType)]
-        enum Event {
-            A(u8, bool, Vec<String>),
-        }
-
-        // Create fake metadata that knows about our single event, above:
-        let metadata = metadata::<Event>();
-
-        // Encode our events in the format we expect back from a node, and
-        // construst an Events object to iterate them:
-        let event = Event::A(1, true, vec!["Hi".into()]);
-        let events = events::<Event>(
-            metadata,
-            vec![event_record(Phase::ApplyExtrinsic(123), event.clone())],
-        );
-
-        let ev = events
-            .iter()
-            .next()
-            .expect("one event expected")
-            .expect("event should be extracted OK");
-
-        // This is the line we're testing; decode into our "pallet event" enum.
-        let decoded_event = ev
-            .as_pallet_event::<Event>()
-            .expect("can decode event into root enum again");
-
-        // It should equal the event we put in:
-        assert_eq!(decoded_event, event);
     }
 
     #[test]
@@ -970,5 +958,37 @@ mod tests {
             },
         );
         assert!(event_details.next().is_none());
+    }
+
+    #[test]
+    fn topics() {
+        #[derive(Clone, Debug, PartialEq, Decode, Encode, TypeInfo, scale_decode::DecodeAsType)]
+        enum Event {
+            A(u8, bool, Vec<String>),
+        }
+
+        // Create fake metadata that knows about our single event, above:
+        let metadata = metadata::<Event>();
+
+        // Encode our events in the format we expect back from a node, and
+        // construct an Events object to iterate them:
+        let event = Event::A(1, true, vec!["Hi".into()]);
+        let topics = vec![H256::from_low_u64_le(123), H256::from_low_u64_le(456)];
+        let events = events::<Event>(
+            metadata,
+            vec![EventRecord::new(
+                Phase::ApplyExtrinsic(123),
+                event,
+                topics.clone(),
+            )],
+        );
+
+        let ev = events
+            .iter()
+            .next()
+            .expect("one event expected")
+            .expect("event should be extracted OK");
+
+        assert_eq!(topics, ev.topics());
     }
 }

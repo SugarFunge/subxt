@@ -17,12 +17,9 @@ use crate::{
     tx::TxClient,
     Config, Metadata,
 };
-use codec::{Compact, Decode};
 use derivative::Derivative;
-use frame_metadata::RuntimeMetadataPrefixed;
 use futures::future;
-use parking_lot::RwLock;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// A trait representing a client that can perform
 /// online actions.
@@ -58,10 +55,7 @@ impl<T: Config> std::fmt::Debug for OnlineClient<T> {
 }
 
 /// The default RPC client that's used (based on [`jsonrpsee`]).
-#[cfg(any(
-    feature = "jsonrpsee-ws",
-    all(feature = "jsonrpsee-web", target_arch = "wasm32")
-))]
+#[cfg(feature = "jsonrpsee")]
 pub async fn default_rpc_client<U: AsRef<str>>(url: U) -> Result<impl RpcClientT, Error> {
     let client = jsonrpsee_helpers::client(url.as_ref())
         .await
@@ -70,10 +64,7 @@ pub async fn default_rpc_client<U: AsRef<str>>(url: U) -> Result<impl RpcClientT
 }
 
 // The default constructors assume Jsonrpsee.
-#[cfg(any(
-    feature = "jsonrpsee-ws",
-    all(feature = "jsonrpsee-web", target_arch = "wasm32")
-))]
+#[cfg(feature = "jsonrpsee")]
 impl<T: Config> OnlineClient<T> {
     /// Construct a new [`OnlineClient`] using default settings which
     /// point to a locally running node on `ws://127.0.0.1:9944`.
@@ -121,14 +112,14 @@ impl<T: Config> OnlineClient<T> {
     pub fn from_rpc_client_with<R: RpcClientT>(
         genesis_hash: T::Hash,
         runtime_version: RuntimeVersion,
-        metadata: Metadata,
+        metadata: impl Into<Metadata>,
         rpc_client: Arc<R>,
     ) -> Result<OnlineClient<T>, Error> {
         Ok(OnlineClient {
             inner: Arc::new(RwLock::new(Inner {
                 genesis_hash,
                 runtime_version,
-                metadata,
+                metadata: metadata.into(),
             })),
             rpc: Rpc::new(rpc_client),
         })
@@ -136,11 +127,35 @@ impl<T: Config> OnlineClient<T> {
 
     /// Fetch the metadata from substrate using the runtime API.
     async fn fetch_metadata(rpc: &Rpc<T>) -> Result<Metadata, Error> {
-        let bytes = rpc.state_call("Metadata_metadata", None, None).await?;
-        let cursor = &mut &*bytes;
-        let _ = <Compact<u32>>::decode(cursor)?;
-        let meta: RuntimeMetadataPrefixed = Decode::decode(cursor)?;
-        Ok(meta.try_into()?)
+        #[cfg(feature = "unstable-metadata")]
+        {
+            /// The unstable metadata version number.
+            const UNSTABLE_METADATA_VERSION: u32 = u32::MAX;
+
+            // Try to fetch the latest unstable metadata, if that fails fall back to
+            // fetching the latest stable metadata.
+            match rpc.metadata_at_version(UNSTABLE_METADATA_VERSION).await {
+                Ok(bytes) => Ok(bytes),
+                Err(_) => OnlineClient::fetch_latest_stable_metadata(rpc).await,
+            }
+        }
+
+        #[cfg(not(feature = "unstable-metadata"))]
+        OnlineClient::fetch_latest_stable_metadata(rpc).await
+    }
+
+    /// Fetch the latest stable metadata from the node.
+    async fn fetch_latest_stable_metadata(rpc: &Rpc<T>) -> Result<Metadata, Error> {
+        // This is the latest stable metadata that subxt can utilize.
+        const V15_METADATA_VERSION: u32 = 15;
+
+        // Try to fetch the metadata version.
+        if let Ok(bytes) = rpc.metadata_at_version(V15_METADATA_VERSION).await {
+            return Ok(bytes);
+        }
+
+        // If that fails, fetch the metadata V14 using the old API.
+        rpc.metadata().await
     }
 
     /// Create an object which can be used to keep the runtime up to date
@@ -190,7 +205,7 @@ impl<T: Config> OnlineClient<T> {
 
     /// Return the [`Metadata`] used in this client.
     pub fn metadata(&self) -> Metadata {
-        let inner = self.inner.read();
+        let inner = self.inner.read().expect("shouldn't be poisoned");
         inner.metadata.clone()
     }
 
@@ -200,14 +215,14 @@ impl<T: Config> OnlineClient<T> {
     ///
     /// Setting custom metadata may leave Subxt unable to work with certain blocks,
     /// subscribe to latest blocks or submit valid transactions.
-    pub fn set_metadata(&self, metadata: Metadata) {
-        let mut inner = self.inner.write();
-        inner.metadata = metadata;
+    pub fn set_metadata(&self, metadata: impl Into<Metadata>) {
+        let mut inner = self.inner.write().expect("shouldn't be poisoned");
+        inner.metadata = metadata.into();
     }
 
     /// Return the genesis hash.
     pub fn genesis_hash(&self) -> T::Hash {
-        let inner = self.inner.read();
+        let inner = self.inner.read().expect("shouldn't be poisoned");
         inner.genesis_hash
     }
 
@@ -218,13 +233,13 @@ impl<T: Config> OnlineClient<T> {
     /// Setting a custom genesis hash may leave Subxt unable to
     /// submit valid transactions.
     pub fn set_genesis_hash(&self, genesis_hash: T::Hash) {
-        let mut inner = self.inner.write();
+        let mut inner = self.inner.write().expect("shouldn't be poisoned");
         inner.genesis_hash = genesis_hash;
     }
 
     /// Return the runtime version.
     pub fn runtime_version(&self) -> RuntimeVersion {
-        let inner = self.inner.read();
+        let inner = self.inner.read().expect("shouldn't be poisoned");
         inner.runtime_version.clone()
     }
 
@@ -235,7 +250,7 @@ impl<T: Config> OnlineClient<T> {
     /// Setting a custom runtime version may leave Subxt unable to
     /// submit valid transactions.
     pub fn set_runtime_version(&self, runtime_version: RuntimeVersion) {
-        let mut inner = self.inner.write();
+        let mut inner = self.inner.write().expect("shouldn't be poisoned");
         inner.runtime_version = runtime_version;
     }
 
@@ -246,7 +261,7 @@ impl<T: Config> OnlineClient<T> {
 
     /// Return an offline client with the same configuration as this.
     pub fn offline(&self) -> OfflineClient<T> {
-        let inner = self.inner.read();
+        let inner = self.inner.read().expect("shouldn't be poisoned");
         OfflineClient::new(
             inner.genesis_hash,
             inner.runtime_version.clone(),
@@ -312,12 +327,12 @@ pub struct ClientRuntimeUpdater<T: Config>(OnlineClient<T>);
 
 impl<T: Config> ClientRuntimeUpdater<T> {
     fn is_runtime_version_different(&self, new: &RuntimeVersion) -> bool {
-        let curr = self.0.inner.read();
+        let curr = self.0.inner.read().expect("shouldn't be poisoned");
         &curr.runtime_version != new
     }
 
     fn do_update(&self, update: Update) {
-        let mut writable = self.0.inner.write();
+        let mut writable = self.0.inner.write().expect("shouldn't be poisoned");
         writable.metadata = update.metadata;
         writable.runtime_version = update.runtime_version;
     }
@@ -384,7 +399,7 @@ impl<T: Config> RuntimeUpdaterStream<T> {
             Err(err) => return Some(Err(err)),
         };
 
-        let metadata = match self.client.rpc().metadata(None).await {
+        let metadata = match self.client.rpc().metadata().await {
             Ok(metadata) => metadata,
             Err(err) => return Some(Err(err)),
         };
@@ -423,7 +438,7 @@ impl Update {
 }
 
 // helpers for a jsonrpsee specific OnlineClient.
-#[cfg(feature = "jsonrpsee-ws")]
+#[cfg(all(feature = "jsonrpsee", feature = "native"))]
 mod jsonrpsee_helpers {
     pub use jsonrpsee::{
         client_transport::ws::{InvalidUri, Receiver, Sender, Uri, WsTransportClientBuilder},
@@ -453,7 +468,7 @@ mod jsonrpsee_helpers {
 }
 
 // helpers for a jsonrpsee specific OnlineClient.
-#[cfg(all(feature = "jsonrpsee-web", target_arch = "wasm32"))]
+#[cfg(all(feature = "jsonrpsee", feature = "web"))]
 mod jsonrpsee_helpers {
     pub use jsonrpsee::{
         client_transport::web,

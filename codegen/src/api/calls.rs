@@ -7,11 +7,10 @@ use crate::{
     types::{CompositeDefFields, TypeGenerator},
     CratePath,
 };
-use frame_metadata::{v14::RuntimeMetadataV14, PalletMetadata};
 use heck::{ToSnakeCase as _, ToUpperCamelCase as _};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use scale_info::form::PortableForm;
+use subxt_metadata::PalletMetadata;
 
 /// Generate calls from the provided pallet's metadata. Each call returns a `StaticTxPayload`
 /// that can be passed to the subxt client to submit/sign/encode.
@@ -23,21 +22,20 @@ use scale_info::form::PortableForm;
 /// - `pallet` - Pallet metadata from which the calls are generated.
 /// - `types_mod_ident` - The ident of the base module that we can use to access the generated types from.
 pub fn generate_calls(
-    metadata: &RuntimeMetadataV14,
     type_gen: &TypeGenerator,
-    pallet: &PalletMetadata<PortableForm>,
+    pallet: &PalletMetadata,
     types_mod_ident: &syn::Ident,
     crate_path: &CratePath,
     should_gen_docs: bool,
 ) -> Result<TokenStream2, CodegenError> {
     // Early return if the pallet has no calls.
-    let Some(call) = &pallet.calls else {
+    let Some(call_ty) = pallet.call_ty_id() else {
         return Ok(quote!());
     };
 
     let mut struct_defs = super::generate_structs_from_variants(
         type_gen,
-        call.ty.id,
+        call_ty,
         |name| name.to_upper_camel_case().into(),
         "Call",
         crate_path,
@@ -61,20 +59,19 @@ pub fn generate_calls(
                     .unzip(),
                 CompositeDefFields::NoFields => Default::default(),
                 CompositeDefFields::Unnamed(_) => {
-                    return Err(CodegenError::InvalidCallVariant(call.ty.id))
+                    return Err(CodegenError::InvalidCallVariant(call_ty))
                 }
             };
 
-            let pallet_name = &pallet.name;
+            let pallet_name = pallet.name();
             let call_name = &variant_name;
             let struct_name = &struct_def.name;
-            let Ok(call_hash) =
-                subxt_metadata::get_call_hash(metadata, pallet_name, call_name) else {
-                    return Err(CodegenError::MissingCallMetadata(
-                        pallet_name.into(),
-                        call_name.to_string(),
-                    ))
-                };
+            let Some(call_hash) = pallet.call_hash(call_name) else {
+                return Err(CodegenError::MissingCallMetadata(
+                    pallet_name.into(),
+                    call_name.to_string(),
+                ))
+            };
             let fn_name = format_ident!("{}", variant_name.to_snake_case());
             // Propagate the documentation just to `TransactionApi` methods, while
             // draining the documentation of inner call structures.
@@ -83,6 +80,11 @@ pub fn generate_calls(
             // The call structure's documentation was stripped above.
             let call_struct = quote! {
                 #struct_def
+
+                impl #crate_path::blocks::StaticExtrinsic for #struct_name {
+                    const PALLET: &'static str = #pallet_name;
+                    const CALL: &'static str = #call_name;
+                }
             };
 
             let client_fn = quote! {
@@ -90,11 +92,11 @@ pub fn generate_calls(
                 pub fn #fn_name(
                     &self,
                     #( #call_fn_args, )*
-                ) -> #crate_path::tx::Payload<#struct_name> {
+                ) -> #crate_path::tx::Payload<types::#struct_name> {
                     #crate_path::tx::Payload::new_static(
                         #pallet_name,
                         #call_name,
-                        #struct_name { #( #call_args, )* },
+                        types::#struct_name { #( #call_args, )* },
                         [#(#call_hash,)*]
                     )
                 }
@@ -106,7 +108,8 @@ pub fn generate_calls(
         .into_iter()
         .unzip();
 
-    let call_ty = type_gen.resolve_type(call.ty.id);
+    let call_type = type_gen.resolve_type_path(call_ty);
+    let call_ty = type_gen.resolve_type(call_ty);
     let docs = &call_ty.docs;
     let docs = should_gen_docs
         .then_some(quote! { #( #[doc = #docs ] )* })
@@ -114,13 +117,18 @@ pub fn generate_calls(
 
     Ok(quote! {
         #docs
+        pub type Call = #call_type;
         pub mod calls {
             use super::root_mod;
             use super::#types_mod_ident;
 
             type DispatchError = #types_mod_ident::sp_runtime::DispatchError;
 
-            #( #call_structs )*
+            pub mod types {
+                use super::#types_mod_ident;
+
+                #( #call_structs )*
+            }
 
             pub struct TransactionApi;
 

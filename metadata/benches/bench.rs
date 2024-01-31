@@ -4,71 +4,43 @@
 
 use codec::Decode;
 use criterion::*;
-use frame_metadata::{RuntimeMetadata::V14, RuntimeMetadataPrefixed, RuntimeMetadataV14};
-use scale_info::{form::PortableForm, TypeDef, TypeDefVariant};
+use frame_metadata::{RuntimeMetadata, RuntimeMetadataPrefixed};
 use std::{fs, path::Path};
-use subxt_metadata::{
-    get_call_hash, get_constant_hash, get_metadata_hash, get_pallet_hash, get_storage_hash,
-};
+use subxt_metadata::Metadata;
 
-fn load_metadata() -> RuntimeMetadataV14 {
-    let bytes = fs::read(Path::new("../artifacts/polkadot_metadata.scale"))
+fn load_metadata() -> Metadata {
+    let bytes = fs::read(Path::new("../artifacts/polkadot_metadata_full.scale"))
         .expect("Cannot read metadata blob");
     let meta: RuntimeMetadataPrefixed =
         Decode::decode(&mut &*bytes).expect("Cannot decode scale metadata");
 
     match meta.1 {
-        V14(v14) => v14,
+        RuntimeMetadata::V14(v14) => v14.try_into().unwrap(),
+        RuntimeMetadata::V15(v15) => v15.try_into().unwrap(),
         _ => panic!("Unsupported metadata version {:?}", meta.1),
-    }
-}
-
-fn expect_variant(def: &TypeDef<PortableForm>) -> &TypeDefVariant<PortableForm> {
-    match def {
-        TypeDef::Variant(variant) => variant,
-        _ => panic!("Expected a variant type, got {def:?}"),
     }
 }
 
 fn bench_get_metadata_hash(c: &mut Criterion) {
     let metadata = load_metadata();
 
-    c.bench_function("get_metadata_hash", |b| {
-        b.iter(|| get_metadata_hash(&metadata))
-    });
-}
-
-fn bench_get_pallet_hash(c: &mut Criterion) {
-    let metadata = load_metadata();
-    let mut group = c.benchmark_group("get_pallet_hash");
-
-    for pallet in metadata.pallets.iter() {
-        let pallet_name = &pallet.name;
-        group.bench_function(pallet_name, |b| {
-            b.iter(|| get_pallet_hash(&metadata.types, pallet))
-        });
-    }
+    c.bench_function("get_metadata_hash", |b| b.iter(|| metadata.hasher().hash()));
 }
 
 fn bench_get_call_hash(c: &mut Criterion) {
     let metadata = load_metadata();
     let mut group = c.benchmark_group("get_call_hash");
 
-    for pallet in metadata.pallets.iter() {
-        let pallet_name = &pallet.name;
-        let call_type_id = match &pallet.calls {
-            Some(calls) => calls.ty.id,
-            None => continue,
+    for pallet in metadata.pallets() {
+        let pallet_name = pallet.name();
+        let Some(variants) = pallet.call_variants() else {
+            continue;
         };
-        let call_type = metadata.types.resolve(call_type_id).unwrap();
-        let variants = expect_variant(&call_type.type_def);
 
-        for variant in &variants.variants {
+        for variant in variants {
             let call_name = &variant.name;
             let bench_name = format!("{pallet_name}/{call_name}");
-            group.bench_function(&bench_name, |b| {
-                b.iter(|| get_call_hash(&metadata, &pallet.name, call_name))
-            });
+            group.bench_function(&bench_name, |b| b.iter(|| pallet.call_hash(call_name)));
         }
     }
 }
@@ -77,13 +49,13 @@ fn bench_get_constant_hash(c: &mut Criterion) {
     let metadata = load_metadata();
     let mut group = c.benchmark_group("get_constant_hash");
 
-    for pallet in metadata.pallets.iter() {
-        let pallet_name = &pallet.name;
-        for constant in &pallet.constants {
-            let constant_name = &constant.name;
+    for pallet in metadata.pallets() {
+        let pallet_name = pallet.name();
+        for constant in pallet.constants() {
+            let constant_name = constant.name();
             let bench_name = format!("{pallet_name}/{constant_name}");
             group.bench_function(&bench_name, |b| {
-                b.iter(|| get_constant_hash(&metadata, &pallet.name, constant_name))
+                b.iter(|| pallet.constant_hash(constant_name))
             });
         }
     }
@@ -93,18 +65,17 @@ fn bench_get_storage_hash(c: &mut Criterion) {
     let metadata = load_metadata();
     let mut group = c.benchmark_group("get_storage_hash");
 
-    for pallet in metadata.pallets.iter() {
-        let pallet_name = &pallet.name;
-        let storage_entries = match &pallet.storage {
-            Some(storage) => &storage.entries,
-            None => continue,
+    for pallet in metadata.pallets() {
+        let pallet_name = pallet.name();
+        let Some(storage_entries) = pallet.storage() else {
+            continue;
         };
 
-        for storage in storage_entries {
-            let storage_name = &storage.name;
+        for storage in storage_entries.entries() {
+            let storage_name = storage.name();
             let bench_name = format!("{pallet_name}/{storage_name}");
             group.bench_function(&bench_name, |b| {
-                b.iter(|| get_storage_hash(&metadata, &pallet.name, storage_name))
+                b.iter(|| pallet.storage_hash(storage_name))
             });
         }
     }
@@ -115,7 +86,6 @@ criterion_group!(
     config = Criterion::default();
     targets =
         bench_get_metadata_hash,
-        bench_get_pallet_hash,
         bench_get_call_hash,
         bench_get_constant_hash,
         bench_get_storage_hash,

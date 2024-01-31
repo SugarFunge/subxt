@@ -20,21 +20,21 @@
 //! ```no_run
 //! use std::fs;
 //! use codec::Decode;
-//! use frame_metadata::RuntimeMetadataPrefixed;
+//! use subxt_metadata::Metadata;
 //! use subxt_codegen::{CratePath, DerivesRegistry, TypeSubstitutes};
 //!
-//! let encoded = fs::read("../artifacts/polkadot_metadata.scale").unwrap();
+//! let encoded = fs::read("../artifacts/polkadot_metadata_full.scale").unwrap();
 //!
 //! // Runtime metadata obtained from a node.
-//! let metadata = <RuntimeMetadataPrefixed as Decode>::decode(&mut &*encoded).unwrap();
+//! let metadata = Metadata::decode(&mut &*encoded).unwrap();
 //! // Module under which the API is generated.
 //! let item_mod = syn::parse_quote!(
 //!     pub mod api {}
 //! );
 //! // Default module derivatives.
-//! let mut derives = DerivesRegistry::new(&CratePath::default());
+//! let mut derives = DerivesRegistry::with_default_derives(&CratePath::default());
 //! // Default type substitutes.
-//! let substs = TypeSubstitutes::new(&CratePath::default());
+//! let substs = TypeSubstitutes::with_default_substitutes(&CratePath::default());
 //! // Generate the Runtime API.
 //! let generator = subxt_codegen::RuntimeGenerator::new(metadata);
 //! // Include metadata documentation in the Runtime API.

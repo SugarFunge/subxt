@@ -4,16 +4,17 @@
 
 pub mod dispatch_error;
 mod metadata_test_runner;
-mod pallet_metadata_test_runner;
 
 use frame_metadata::{
-    v14::RuntimeMetadataV14, ExtrinsicMetadata, PalletMetadata, PalletStorageMetadata,
-    RuntimeMetadataPrefixed, StorageEntryMetadata,
+    v15::{
+        CustomMetadata, ExtrinsicMetadata, OuterEnums, PalletMetadata, PalletStorageMetadata,
+        RuntimeMetadataV15, StorageEntryMetadata,
+    },
+    RuntimeMetadataPrefixed,
 };
 use scale_info::{meta_type, IntoPortable, TypeInfo};
 
 pub use metadata_test_runner::MetadataTestRunner;
-pub use pallet_metadata_test_runner::PalletMetadataTestRunner;
 
 /// Given some pallet metadata, generate a [`RuntimeMetadataPrefixed`] struct.
 /// We default to a useless extrinsic type, and register a fake `DispatchError`
@@ -23,12 +24,15 @@ pub fn generate_metadata_from_pallets_custom_dispatch_error<DispatchError: TypeI
 ) -> RuntimeMetadataPrefixed {
     // We don't care about the extrinsic type.
     let extrinsic = ExtrinsicMetadata {
-        ty: meta_type::<()>(),
         version: 0,
         signed_extensions: vec![],
+        address_ty: meta_type::<()>(),
+        call_ty: meta_type::<()>(),
+        signature_ty: meta_type::<()>(),
+        extra_ty: meta_type::<()>(),
     };
 
-    // Construct metadata manually from our types (See `RuntimeMetadataV14::new()`).
+    // Construct metadata manually from our types (See `RuntimeMetadataV15::new()`).
     // Add any extra types we need to the registry.
     let mut registry = scale_info::Registry::new();
     let pallets = registry.map_into_portable(pallets);
@@ -40,19 +44,31 @@ pub fn generate_metadata_from_pallets_custom_dispatch_error<DispatchError: TypeI
     enum RuntimeCall {}
     #[derive(TypeInfo)]
     enum RuntimeEvent {}
+    #[derive(TypeInfo)]
+    enum RuntimeError {}
 
     let ty = registry.register_type(&meta_type::<Runtime>());
-    registry.register_type(&meta_type::<RuntimeCall>());
-    registry.register_type(&meta_type::<RuntimeEvent>());
+    let runtime_call = registry.register_type(&meta_type::<RuntimeCall>());
+    let runtime_event = registry.register_type(&meta_type::<RuntimeEvent>());
+    let runtime_error = registry.register_type(&meta_type::<RuntimeError>());
 
     // Metadata needs to contain this DispatchError, since codegen looks for it.
     registry.register_type(&meta_type::<DispatchError>());
 
-    let metadata = RuntimeMetadataV14 {
+    let metadata = RuntimeMetadataV15 {
         types: registry.into(),
         pallets,
         extrinsic,
         ty,
+        apis: vec![],
+        outer_enums: OuterEnums {
+            call_enum_ty: runtime_call,
+            event_enum_ty: runtime_event,
+            error_enum_ty: runtime_error,
+        },
+        custom: CustomMetadata {
+            map: Default::default(),
+        },
     };
 
     RuntimeMetadataPrefixed::from(metadata)
@@ -86,6 +102,7 @@ pub fn generate_metadata_from_storage_entries(
         calls: None,
         event: None,
         error: None,
+        docs: vec![],
     };
 
     generate_metadata_from_pallets(vec![pallet])
