@@ -48,7 +48,7 @@ jobs:
               uses: Swatinem/rust-cache@dd05243424bd5c0e585e4b55eb2d7615cdd32f1f # v2.5.1
 
             - name: Install cargo-hack
-              uses: baptiste0928/cargo-install@v2
+              uses: baptiste0928/cargo-install@v3
               with:
                   crate: cargo-hack
                   version: 0.5
