@@ -79,7 +79,7 @@ which = "4.4.0"
 # Light client support:
 smoldot-light = { version = "0.6.0", default-features = false }
 tokio-stream = "0.1.14"
-futures-util = "0.3.28"
+futures-util = "0.3.30"
 
 # Substrate crates:
 sp-core = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43", default-features = false}
